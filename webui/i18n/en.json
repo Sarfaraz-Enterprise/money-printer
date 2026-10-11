@@ -5,6 +5,8 @@
     "Made for Kids": "Yes, made for kids",
     "Not Made for Kids": "No, not made for kids",
     "YouTube Audience Help": "Choose based on the video's intended audience. This declaration is sent with YouTube uploads; it does not change the generated content.",
+    "Schedule Auto-Published Videos": "Schedule auto-published videos",
+    "Schedule Auto-Published Videos Help": "Add generated videos to the connected Upload-Post profile's next available queue slot instead of publishing immediately. Configure queue times and timezone in Upload-Post.",
     "Kokoro Voices Unavailable": "Could not load Kokoro voices. Your previous selection is retained. Check the connection or enter voices manually.",
     "Login Required": "Login Required",
     "Please login to access settings": "Please login to access settings",

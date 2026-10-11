@@ -16,6 +16,7 @@ _CONFIG_BASE = {
     "upload_post_username": "testuser",
     "upload_post_platforms": ["tiktok", "instagram", "youtube"],
     "upload_post_auto_upload": True,
+    "upload_post_add_to_queue": False,
     "upload_post_youtube_privacy_status": "unlisted",
 }
 
@@ -364,6 +365,33 @@ class TestUploadPostYouTubePayload(unittest.TestCase):
         self.assertEqual(_get(data, "privacyStatus"), "unlisted")
         self.assertEqual(_get(data, "containsSyntheticMedia"), "true")
 
+    @patch("app.services.upload_post.config.app", {
+        **_CONFIG_BASE,
+        "upload_post_add_to_queue": True,
+    })
+    @patch("app.services.upload_post.os.path.exists", return_value=True)
+    @patch("builtins.open", mock_open(read_data=b"fake"))
+    @patch("app.services.upload_post.requests.post")
+    def test_auto_upload_can_be_added_to_queue(self, mock_post, _exists):
+        mock_post.return_value = _mock_response()
+
+        UploadPostService().upload_video("/fake/v.mp4", "Title")
+
+        data = mock_post.call_args.kwargs["data"]
+        self.assertEqual(_get(data, "add_to_queue"), "true")
+
+    @patch("app.services.upload_post.config.app", _CONFIG_BASE)
+    @patch("app.services.upload_post.os.path.exists", return_value=True)
+    @patch("builtins.open", mock_open(read_data=b"fake"))
+    @patch("app.services.upload_post.requests.post")
+    def test_immediate_upload_does_not_send_queue_flag(self, mock_post, _exists):
+        mock_post.return_value = _mock_response()
+
+        UploadPostService().upload_video("/fake/v.mp4", "Title")
+
+        data = mock_post.call_args.kwargs["data"]
+        self.assertFalse(_has_key(data, "add_to_queue"))
+
     @patch("app.services.upload_post.config.app", _CONFIG_BASE)
     @patch("app.services.upload_post.os.path.exists", return_value=True)
     @patch("builtins.open", mock_open(read_data=b"fake"))
@@ -439,6 +467,7 @@ class TestUploadPostServiceDynamicConfig(unittest.TestCase):
             "upload_post_username": "",
             "upload_post_enabled": False,
             "upload_post_auto_upload": False,
+            "upload_post_add_to_queue": False,
             "upload_post_platforms": ["tiktok"],
         }
         
@@ -450,12 +479,14 @@ class TestUploadPostServiceDynamicConfig(unittest.TestCase):
             
             test_app_config["upload_post_enabled"] = True
             test_app_config["upload_post_auto_upload"] = True
+            test_app_config["upload_post_add_to_queue"] = True
             test_app_config["upload_post_api_key"] = "test-key"
             test_app_config["upload_post_username"] = "test-user"
             test_app_config["upload_post_platforms"] = ["tiktok", "instagram"]
             
             self.assertTrue(service.enabled)
             self.assertTrue(service.auto_upload)
+            self.assertTrue(service.add_to_queue)
             self.assertEqual(service.api_key, "test-key")
             self.assertTrue(service.is_configured())
             self.assertIn("instagram", service.platforms)

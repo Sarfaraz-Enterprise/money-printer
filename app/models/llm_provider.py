@@ -247,6 +247,9 @@ LLM_PROVIDER_REGISTRY = (
         api_key_url="https://platform.claude.com/settings/keys",
         default_model="claude-sonnet-5",
         default_base_url="https://api.anthropic.com/v1/",
+        extra_fields=(
+            LLMProviderField("workspace_id", "Workspace ID (optional)"),
+        ),
     ),
     LLMProviderSpec(
         "gemini",

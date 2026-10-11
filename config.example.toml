@@ -76,6 +76,7 @@ tls_verify = true
 # OpenAI-compatible /images/generations endpoint (local ComfyUI/SD gateways
 # or cloud relays) and renders it into a video clip.
 video_source = "pexels"
+final_video_export_dir = ""
 
 # API key lists support key rotation. Use straight ASCII double quotes and
 # separate multiple keys with commas, for example: ["key-1", "key-2"].
@@ -305,6 +306,8 @@ openai_model_name = ""
 anthropic_api_key = ""
 anthropic_base_url = ""
 anthropic_model_name = ""
+# Required for API keys that are not scoped to a workspace.
+anthropic_workspace_id = ""
 
 # Google Gemini
 # API key: https://aistudio.google.com/app/apikey
@@ -526,6 +529,9 @@ upload_post_username = ""
 upload_post_platforms = ["tiktok", "instagram"]
 # Automatically publish successful video outputs after generation.
 upload_post_auto_upload = false
+# Schedule automatic uploads into the Upload-Post profile's next queue slot.
+# Configure the queue timezone and publication times in Upload-Post.
+upload_post_add_to_queue = false
 # YouTube privacy: "public", "unlisted", or "private".
 upload_post_youtube_privacy_status = "public"
 # Declare whether the video is made for children. Choose based on its audience.

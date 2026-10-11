@@ -6,6 +6,48 @@ from app.services import llm
 
 
 class TestLlmClientCleanup(unittest.TestCase):
+    def test_anthropic_workspace_header_is_optional_and_provider_scoped(self):
+        cases = [
+            ("anthropic", " wrk_test ", "wrk_test"),
+            ("anthropic", "", None),
+            ("anthropic", None, None),
+            ("openai", "wrk_test", None),
+        ]
+        for provider, workspace_id, expected_header in cases:
+            with self.subTest(provider=provider, workspace_id=workspace_id):
+                requests = []
+
+                def request(req):
+                    requests.append(req)
+                    return httpx.Response(200, json={
+                        "id": "test", "object": "chat.completion", "created": 1,
+                        "model": "test-model", "choices": [{
+                            "index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "valid narration"},
+                        }],
+                    })
+
+                transport = httpx.Client(transport=httpx.MockTransport(request))
+
+                def create(**kwargs):
+                    return OpenAI(**kwargs, max_retries=0, http_client=transport)
+
+                settings = {
+                    "llm_provider": provider,
+                    f"{provider}_api_key": "test-key",
+                    f"{provider}_model_name": "test-model",
+                    f"{provider}_base_url": "https://example.test/v1",
+                    "anthropic_workspace_id": workspace_id,
+                }
+                with patch.object(llm, "OpenAI", side_effect=create):
+                    result = llm._generate_response("hello", app_config=settings)
+                self.assertEqual(result, "valid narration")
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(
+                    requests[0].headers.get("anthropic-workspace-id"), expected_header
+                )
+                self.assertTrue(transport.is_closed)
+
     def test_sdk_transport_closed_after_success_and_request_failure(self):
         cases = [
             ("openai", "OpenAI", {"openai_api_key": "test-key", "openai_model_name": "test-model", "openai_base_url": "https://example.test/v1"}),

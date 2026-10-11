@@ -43,7 +43,8 @@ def test_webui_upload_post_checkboxes_stay_decoupled():
     test_app_config = dict(
         config.app,
         upload_post_enabled=True,
-        upload_post_auto_upload=False
+        upload_post_auto_upload=False,
+        upload_post_add_to_queue=False,
     )
 
     with (
@@ -57,18 +58,25 @@ def test_webui_upload_post_checkboxes_stay_decoupled():
 
         enabled_box = _widget_by_key(app.checkbox, "upload_post_enabled_checkbox")
         auto_box = _widget_by_key(app.checkbox, "upload_post_auto_upload_checkbox")
+        queue_box = _widget_by_key(app.checkbox, "upload_post_add_to_queue_checkbox")
         assert enabled_box.value is True
         assert auto_box.value is False
+        assert queue_box.value is False
 
         # Merely rendering the dialog must not have rewritten the split config
         assert config.app["upload_post_enabled"] is True
         assert config.app["upload_post_auto_upload"] is False
+        assert config.app["upload_post_add_to_queue"] is False
 
         # Toggling auto_upload on must leave enabled untouched
         auto_box.set_value(True)
         app.run()
         assert config.app["upload_post_enabled"] is True
         assert config.app["upload_post_auto_upload"] is True
+
+        queue_box.set_value(True)
+        app.run()
+        assert config.app["upload_post_add_to_queue"] is True
 
 def test_webui_upload_post_youtube_privacy_fallback_to_public():
     # If the config somehow contains an invalid YouTube privacy value (e.g. "draft"),

@@ -1315,6 +1315,39 @@ class TestVoiceService(unittest.TestCase):
         self.assertNotIn("---", subtitle_content)
         self.assertNotIn("00:00:00,000 --> 00:00:00,000", subtitle_content)
 
+    def test_create_subtitle_writes_partial_edge_match_as_best_effort(self):
+        """部分匹配时，字幕文件应保留已聚合的 cue，而不是直接丢弃。"""
+        text = "This is the first line. This is the second line. This is the third line."
+        script_lines = utils.split_string_by_punctuations(text)
+        sub_maker = SimpleNamespace(
+            cues=[
+                SimpleNamespace(
+                    content="This is the first line",
+                    start=timedelta(seconds=0),
+                    end=timedelta(seconds=1),
+                ),
+                SimpleNamespace(
+                    content="This is the second line",
+                    start=timedelta(seconds=1),
+                    end=timedelta(seconds=2),
+                ),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            subtitle_file = Path(tmp_dir) / "partial-edge.srt"
+            vs.create_subtitle(
+                sub_maker=sub_maker,
+                text=text,
+                subtitle_file=str(subtitle_file),
+            )
+            subtitle_content = subtitle_file.read_text(encoding="utf-8")
+
+        self.assertIn("This is the first line", subtitle_content)
+        self.assertIn("This is the second line", subtitle_content)
+        self.assertNotIn("This is the third line", subtitle_content)
+        self.assertIn(" --> ", subtitle_content)
+
     def test_create_subtitle_word_level_preserves_edge_cue_timing(self):
         """Edge TTS 的细粒度 cue 应逐项写入，不能再被按标点聚合。"""
         sub_maker = SimpleNamespace(

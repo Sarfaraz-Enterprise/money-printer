@@ -58,8 +58,8 @@ from app.services import (
     video,
     volcengine_seedance,
     voice,
-    webui_task,
 )
+import app.services.webui_task as webui_task
 from app.services import elevenlabs_music as elevenlabs_music_service
 from app.services import sonilo as sonilo_service
 from app.services import state as sm
@@ -3254,6 +3254,16 @@ def _render_settings_dialog():
             )
             if upload_post_auto_upload != is_auto:
                 _set_runtime_config("app", "upload_post_auto_upload", upload_post_auto_upload)
+
+            add_to_queue = config.app.get("upload_post_add_to_queue", False)
+            upload_post_add_to_queue = st.checkbox(
+                tr("Schedule Auto-Published Videos"),
+                value=add_to_queue,
+                help=tr("Schedule Auto-Published Videos Help"),
+                key="upload_post_add_to_queue_checkbox"
+            )
+            if upload_post_add_to_queue != add_to_queue:
+                _set_runtime_config("app", "upload_post_add_to_queue", upload_post_add_to_queue)
 
             upload_post_api_key = st.text_input(
                 tr("Upload-Post API Key"),

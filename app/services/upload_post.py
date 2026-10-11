@@ -32,6 +32,7 @@ class UploadPostService:
             "upload_post_api_key": settings.get("upload_post_api_key", ""),
             "upload_post_username": settings.get("upload_post_username", ""),
             "upload_post_enabled": settings.get("upload_post_enabled", False),
+            "upload_post_add_to_queue": settings.get("upload_post_add_to_queue", False),
         }
 
     def _account_setting(self, key: str, default):
@@ -157,6 +158,10 @@ class UploadPostService:
         return config.app.get("upload_post_auto_upload", False)
 
     @property
+    def add_to_queue(self) -> bool:
+        return self._account_setting("upload_post_add_to_queue", False)
+
+    @property
     def youtube_privacy_status(self) -> str:
         return config.app.get("upload_post_youtube_privacy_status", "public")
 
@@ -226,6 +231,8 @@ class UploadPostService:
                     ('title', title[:2200]),
                     ('privacy_level', privacy_level),
                 ]
+                if self.add_to_queue:
+                    data.append(('add_to_queue', 'true'))
 
                 for platform in platforms:
                     data.append(('platform[]', platform))

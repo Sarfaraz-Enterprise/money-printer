@@ -3460,9 +3460,10 @@ def create_subtitle(
 
         if len(sub_items) != len(script_lines):
             logger.warning(
-                f"failed, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
+                f"partial subtitle match, sub_items len: {len(sub_items)}, script_lines len: {len(script_lines)}"
             )
-            return
+            if not sub_items:
+                return
 
         _write_subtitle_items(sub_items, subtitle_file)
     except Exception as e:

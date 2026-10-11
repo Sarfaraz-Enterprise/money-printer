@@ -25,6 +25,38 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
 
 
 class TestTaskService(unittest.TestCase):
+    def test_final_video_export_preserves_original_and_separates_tasks(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            export_root = Path(temporary_dir) / "MoneyPrint Ai Video"
+            with patch.dict(tm.config.app, {"final_video_export_dir": str(export_root)}):
+                for task_id in ("task-one", "task-two"):
+                    source = Path(temporary_dir) / task_id / "final-1.mp4"
+                    source.parent.mkdir()
+                    source.write_bytes(task_id.encode())
+                    destination = Path(tm._export_final_video(str(source)))
+                    self.assertEqual(destination, export_root / task_id / source.name)
+                    self.assertEqual(destination.read_bytes(), source.read_bytes())
+                    self.assertTrue(source.exists())
+
+    def test_final_video_export_is_disabled_when_unconfigured(self):
+        with patch.dict(tm.config.app, {"final_video_export_dir": ""}):
+            self.assertEqual(tm._export_final_video("missing/final-1.mp4"), "")
+
+    def test_final_video_export_failure_cleans_up_partial_copy(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            export_root = Path(temporary_dir) / "exports"
+            source = Path(temporary_dir) / "task-one" / "final-1.mp4"
+            source.parent.mkdir()
+            source.write_bytes(b"original")
+            with (
+                patch.dict(tm.config.app, {"final_video_export_dir": str(export_root)}),
+                patch.object(tm.shutil, "copyfile", side_effect=OSError("disk full")),
+            ):
+                with self.assertRaises(OSError):
+                    tm._export_final_video(str(source))
+            self.assertEqual(source.read_bytes(), b"original")
+            self.assertEqual(list((export_root / "task-one").iterdir()), [])
+
     def setUp(self):
         # 发布 Future 注册表是进程级状态。测试间清理可以避免某个模拟 Future
         # 影响后续恢复测试，同时不会触碰真正线程池中的生产任务。

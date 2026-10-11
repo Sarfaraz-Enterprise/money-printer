@@ -621,9 +621,18 @@ def _generate_response(prompt: str, app_config=None) -> str:
             else:
                 raise Exception(f"[{llm_provider}] returned an empty response")
 
+        default_headers = {}
+        if llm_provider == "anthropic":
+            workspace_id = str(
+                runtime_app_config.get("anthropic_workspace_id") or ""
+            ).strip()
+            if workspace_id:
+                default_headers["anthropic-workspace-id"] = workspace_id
+
         client = sdk_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
+            default_headers=default_headers,
         )
 
         response = client.chat.completions.create(

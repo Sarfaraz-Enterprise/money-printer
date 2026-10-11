@@ -20,6 +20,34 @@ def _widget_by_key(elements, key):
     )
 
 
+def test_anthropic_workspace_setting_is_saved_and_available_to_connection_test():
+    app_config = dict(
+        config.app,
+        llm_provider="anthropic",
+        anthropic_api_key="test-key",
+        anthropic_workspace_id="",
+    )
+    with (
+        patch.object(config, "app", app_config),
+        patch.object(config, "ui", dict(config.ui, language="en")),
+        patch.object(config, "try_save_config", return_value=True),
+        patch.object(llm, "test_connection", return_value=(True, "", 0.1)) as test_connection,
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+        app.session_state["ui_language"] = "en"
+        app.session_state["settings_dialog_open"] = True
+        app.run()
+        assert not app.exception
+        workspace_input = _widget_by_key(app.text_input, "anthropic_workspace_id_input")
+        assert workspace_input.label == "Workspace ID (optional)"
+        assert workspace_input.value == ""
+        workspace_input.set_value("wrk_test").run()
+        assert app_config["anthropic_workspace_id"] == "wrk_test"
+        _widget_by_key(app.button, "test_llm_connection_button").click().run()
+        test_connection.assert_called_once()
+        assert not app.exception
+
+
 def test_fluxionai_settings_defaults_and_connection_button():
     """真实运行 Streamlit 组件：检查默认值、配置覆盖及连接测试入口，不写用户配置。"""
     app_config = dict(

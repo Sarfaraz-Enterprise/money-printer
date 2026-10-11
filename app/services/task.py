@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import tempfile
 import threading
@@ -1098,8 +1099,36 @@ def generate_final_videos(
 
         final_video_paths.append(final_video_path)
         combined_video_paths.append(combined_video_path)
+        try:
+            exported_path = _export_final_video(final_video_path)
+            if exported_path:
+                logger.info(f"Final video exported: {exported_path}")
+        except OSError as exc:
+            logger.warning(f"Final video export failed; original retained: {exc}")
+            warnings.append({"code": "final_video_export_failed", "video_index": index})
 
     return final_video_paths, combined_video_paths, warnings
+
+
+def _export_final_video(final_video_path: str) -> str:
+    export_root = str(config.app.get("final_video_export_dir") or "").strip()
+    if not export_root:
+        return ""
+    task_id = path.basename(path.dirname(final_video_path))
+    destination_dir = path.join(path.expanduser(export_root), task_id)
+    os.makedirs(destination_dir, exist_ok=True)
+    destination = path.join(destination_dir, path.basename(final_video_path))
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".export-", suffix=".mp4", dir=destination_dir
+    )
+    os.close(descriptor)
+    try:
+        shutil.copyfile(final_video_path, temporary_path)
+        os.replace(temporary_path, destination)
+    finally:
+        if path.exists(temporary_path):
+            os.remove(temporary_path)
+    return destination
 
 
 def _patch_cross_post_state(task_id: str, **kwargs) -> bool | None:
