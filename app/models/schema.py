@@ -1,6 +1,7 @@
 import warnings
 from enum import Enum
 from typing import Any, List, Literal, Optional, Union
+from app.utils.profile_ids import validate_profile_id
 
 import pydantic
 from pydantic import BaseModel, ConfigDict, Field
@@ -104,7 +105,19 @@ class VideoParams(BaseModel):
     """
 
     video_subject: str
+    output_category: Literal["manual", "scheduled", "fully_automatic"] = "manual"
+    profile_id: str = ""
+
+    @pydantic.field_validator("profile_id")
+    @classmethod
+    def validate_profile_id(cls, value: str) -> str:
+        if not value:
+            return ""
+        return validate_profile_id(value)
+
+    target_account_ids: List[str] = Field(default_factory=list, max_length=50)
     video_script: str = ""  # Script used to generate the video
+    video_description: str = Field(default="", max_length=5000)
     video_terms: Optional[str | List[str]] = None  # Keywords used to generate the video
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait.value
     video_fit_mode: VideoFitMode = VideoFitMode.cover

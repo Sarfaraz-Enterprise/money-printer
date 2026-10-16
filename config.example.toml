@@ -1,6 +1,11 @@
 # MoneyPrinterTurbo configuration example.
 # The app copies this file to config.toml on first run. Keep API keys and other
 # credentials in config.toml; do not commit your local config.toml.
+# These keys can instead be set in a git-ignored .env file (or real environment
+# variables), which then take precedence over config.toml and the WebUI:
+# ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL,
+# ANTHROPIC_WORKSPACE_ID, ANTHROPIC_MODEL, PEXELS_API_KEY, PIXABAY_API_KEY,
+# COVERR_API_KEY (comma-separated for rotation) and UPLOAD_POST_API_KEY.
 
 # =============================================================================
 # API Service / API 服务
@@ -76,6 +81,8 @@ tls_verify = true
 # OpenAI-compatible /images/generations endpoint (local ComfyUI/SD gateways
 # or cloud relays) and renders it into a video clip.
 video_source = "pexels"
+# Empty uses storage/outputs; otherwise this is the output root.
+# Category subfolders: manual, scheduled, fully_automatic.
 final_video_export_dir = ""
 
 # API key lists support key rotation. Use straight ASCII double quotes and
@@ -609,6 +616,9 @@ pitch = 0
 # API key: https://elevenlabs.io/app/settings/api-keys
 # Favorite voices in the ElevenLabs voice library are shown in the WebUI.
 api_key = ""
+# Optional default TTS voice used when a request has no voice ID
+# (the "Server default" option). Falls back to the ELEVENLABS_VOICE_ID env var.
+voice_id = ""
 # Available models include eleven_multilingual_v2, eleven_flash_v2_5, and eleven_v3.
 model_id = "eleven_multilingual_v2"
 # Video-to-Music uses a separate model family while sharing the same API key.

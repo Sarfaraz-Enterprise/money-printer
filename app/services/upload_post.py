@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import requests
 from loguru import logger
-from app.config import config
+from app.config import config, env_secrets
 
 
 _UPLOAD_STATUS_POLL_INTERVAL_SECONDS = 10
@@ -28,8 +28,11 @@ class UploadPostService:
 
     def snapshot_account(self) -> dict:
         settings = dict(config.app if self._account is None else self._account)
+        api_key = settings.get("upload_post_api_key", "")
+        if self._account is None:
+            api_key = env_secrets.resolve("app", "upload_post_api_key", api_key)
         return {
-            "upload_post_api_key": settings.get("upload_post_api_key", ""),
+            "upload_post_api_key": api_key,
             "upload_post_username": settings.get("upload_post_username", ""),
             "upload_post_enabled": settings.get("upload_post_enabled", False),
             "upload_post_add_to_queue": settings.get("upload_post_add_to_queue", False),
@@ -139,7 +142,11 @@ class UploadPostService:
 
     @property
     def api_key(self) -> str:
-        return self._account_setting("upload_post_api_key", "")
+        api_key = self._account_setting("upload_post_api_key", "")
+        if self._account is None:
+            # A snapshot already captured the effective key at submission time.
+            api_key = env_secrets.resolve("app", "upload_post_api_key", api_key)
+        return api_key
 
     @property
     def username(self) -> str:

@@ -2,6 +2,7 @@
 
 import math
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
 
@@ -51,9 +52,30 @@ async def application_lifespan(_: FastAPI):
 
     if isinstance(video_controller.task_manager, RedisTaskManager):
         video_controller.task_manager.resume_queued_tasks()
+    from app.services.comment_agent import CommentAgentService
+    from app.services.scheduler import SchedulerService
+
+    autopilot = SchedulerService()
+    try:
+        autopilot.start()
+    except (OSError, ValueError) as exc:
+        logger.error(
+            f"Auto-Pilot could not start; API remains available. "
+            f"Check scheduler storage/configuration: {type(exc).__name__}"
+        )
+    comment_agent = CommentAgentService()
+    try:
+        comment_agent.start()
+    except (OSError, ValueError) as exc:
+        logger.error(
+            f"Comment agent could not start; API remains available. "
+            f"Check comment agent storage/configuration: {type(exc).__name__}"
+        )
     try:
         yield
     finally:
+        await asyncio.to_thread(comment_agent.stop)
+        await asyncio.to_thread(autopilot.stop)
         logger.info("shutdown event")
 
 

@@ -28,7 +28,7 @@ if root_dir in sys.path:
     sys.path.remove(root_dir)
 sys.path.insert(0, root_dir)
 
-from app.config import config
+from app.config import config, env_secrets
 from app.models import const
 from app.models.llm_provider import (
     DEFAULT_LLM_PROVIDER_ID,
@@ -47,6 +47,7 @@ from app.models.schema import (
 from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
 from app.services import (
+    agent,
     cache_manager,
     llm,
     loomloom,
@@ -69,16 +70,12 @@ from app.utils.logging_utils import configure_terminal_logger
 from app.utils import utils
 
 st.set_page_config(
-    page_title="MoneyPrinterTurbo",
-    page_icon="🤖",
+    page_title="Srz AutoFlow",
+    page_icon="⚡",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
-        "Report a bug": "https://github.com/harry0703/MoneyPrinterTurbo/issues",
-        "About": "# MoneyPrinterTurbo\nSimply provide a topic or keyword for a video, and it will "
-        "automatically generate the video copy, video materials, video subtitles, "
-        "and video background music before synthesizing a high-definition short "
-        "video.\n\nhttps://github.com/harry0703/MoneyPrinterTurbo",
+        "About": "# Srz AutoFlow\nAutonomous Multi-Channel Content & Distribution Engine",
     },
 )
 
@@ -251,10 +248,10 @@ _RUNTIME_CONFIG_SECTIONS = {
 # 避免把任务记录、config.toml 或其它 JSON 误当成本功能的导出文件。
 SETTINGS_PRESET_SCHEMA = "moneyprinterturbo.settings-preset"
 SETTINGS_PRESET_VERSION = 1
-SETTINGS_PRESET_FILE_NAME = "moneyprinterturbo-settings.json"
+SETTINGS_PRESET_FILE_NAME = "srz-automation-settings.json"
 KEY_BACKUP_SCHEMA = "moneyprinterturbo.key-backup"
 KEY_BACKUP_VERSION = 1
-KEY_BACKUP_FILE_NAME = "moneyprinterturbo-keys.json"
+KEY_BACKUP_FILE_NAME = "srz-automation-keys.json"
 # Export files contain only settings or credentials, not media. Reject oversized
 # uploads before decoding and parsing them in the Streamlit process.
 MAX_SETTINGS_TRANSFER_BYTES = 2 * 1024 * 1024
@@ -265,6 +262,7 @@ PRESET_EXCLUDED_PARAM_KEYS = frozenset(
         "video_materials",
         "custom_audio_file",
         "bgm_file",
+        "target_account_ids",
     }
 )
 # 密钥按配置项名称后缀识别。新增 Provider 只要沿用现有命名，就会自动进入
@@ -1745,14 +1743,7 @@ def _render_brand(available_update: str | None = None):
     st.markdown(
         f"""
         <h1 class="mpt-brand">
-            <span class="mpt-brand__name">MoneyPrinterTurbo</span>
-            <a class="mpt-brand__version"
-               href="https://github.com/harry0703/MoneyPrinterTurbo"
-               target="_blank"
-               rel="noopener noreferrer"
-               aria-label="Open MoneyPrinterTurbo on GitHub"
-               title="Open project on GitHub">v{html.escape(str(config.project_version))}</a>
-            {update_link}
+            <span class="mpt-brand__name">⚡ Srz AutoFlow — Autonomous Multi-Channel Content & Distribution Engine</span>
         </h1>
         """,
         unsafe_allow_html=True,
@@ -1782,11 +1773,7 @@ def _render_top_bar():
         )
 
     with brand_col:
-        update_snapshot = version_checker.poll_available_update(config.project_version)
-        if update_snapshot.complete:
-            _render_brand(update_snapshot.available_version)
-        else:
-            _render_pending_version_check()
+        _render_brand()
 
     with actions_col:
         with st.container(
@@ -2044,6 +2031,9 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     st.success(tr("Video Generation Completed"))
+    if task.get("cross_post_results"):
+        st.caption("Publishing results by destination")
+        st.dataframe(task["cross_post_results"], hide_index=True, use_container_width=True)
     for warning in task.get("warnings") or []:
         if isinstance(warning, Mapping) and warning.get("code") == "batch_materials_reused":
             st.warning(
@@ -2093,11 +2083,15 @@ def _render_generation_task_snapshot(task_id, task):
                     download_label = tr("Download Video")
                     if len(video_files) > 1:
                         download_label = f"{download_label} {video_index + 1}"
-                    download_name = _build_video_download_name(
-                        task.get("video_subject"),
-                        video_index + 1,
-                        len(video_files),
-                    )
+                    download_name = os.path.basename(url)
+                    from app.utils.video_outputs import OUTPUT_CATEGORIES
+                    if (
+                        re.fullmatch(r"final-\d+\.mp4", download_name)
+                        and os.path.basename(os.path.dirname(url)) not in OUTPUT_CATEGORIES
+                    ):
+                        download_name = _build_video_download_name(
+                            task.get("video_subject"), video_index + 1, len(video_files)
+                        )
                     with open(url, "rb") as video_file:
                         st.download_button(
                             download_label,
@@ -2670,11 +2664,71 @@ def get_groq_model_ids(api_key: str, base_url: str) -> list[str]:
 
 
 def _get_material_api_keys(config_key):
-    """将配置中的素材 API Key 统一转换为 WebUI 可编辑字符串。"""
-    api_keys = config.app.get(config_key, [])
+    """Effective stock-media keys (env first), as a comma-separated string."""
+    api_keys = env_secrets.resolve(
+        "app", config_key, config.app.get(config_key, [])
+    ) or []
     if isinstance(api_keys, str):
         api_keys = [api_keys]
     return ", ".join(api_keys)
+
+
+def _material_keys_to_storage(value):
+    normalized_value = str(value or "").replace(" ", "")
+    return normalized_value.split(",") if normalized_value else []
+
+
+def _render_server_secret_input(
+    label,
+    widget_key,
+    section_name,
+    config_key,
+    *,
+    container=None,
+    help=None,
+    to_storage=None,
+):
+    """
+    Write-only password field for a server-side secret; returns the effective value.
+
+    Streamlit sends widget values to the browser, so the stored/env secret is
+    never put into the widget (type="password" only hides it visually). An empty
+    field means "keep the server value"; a newly typed value is saved to
+    config.toml and the field is cleared. Env (.env) values always take
+    precedence and are never written to config.toml.
+    Call only before the widget is instantiated in the current run.
+    """
+    target = container if container is not None else st
+    section = _RUNTIME_CONFIG_SECTIONS[section_name]
+    env_managed = env_secrets.is_env_managed(section_name, config_key)
+    effective = env_secrets.resolve(
+        section_name, config_key, section.get(config_key, "")
+    )
+    entered = str(st.session_state.get(widget_key, "") or "").strip()
+
+    if entered:
+        stored_value = to_storage(entered) if to_storage else entered
+        if _set_runtime_config(section_name, config_key, stored_value):
+            st.session_state[widget_key] = ""
+        if not env_managed:
+            effective = stored_value
+    else:
+        st.session_state[widget_key] = ""
+
+    if env_managed:
+        placeholder = "Managed by server .env"
+    elif effective:
+        placeholder = "Configured on server"
+    else:
+        placeholder = ""
+    target.text_input(
+        label,
+        type="password",
+        key=widget_key,
+        help=help,
+        placeholder=placeholder,
+    )
+    return effective
 
 
 def _save_material_api_keys(config_key, value):
@@ -3265,17 +3319,15 @@ def _render_settings_dialog():
             if upload_post_add_to_queue != add_to_queue:
                 _set_runtime_config("app", "upload_post_add_to_queue", upload_post_add_to_queue)
 
-            upload_post_api_key = st.text_input(
+            _render_server_secret_input(
                 tr("Upload-Post API Key"),
-                value=config.app.get("upload_post_api_key", ""),
-                type="password",
+                "upload_post_api_key_input",
+                "app",
+                "upload_post_api_key",
                 help=tr("Upload-Post API Key Help").format(
                     api_keys_url=UPLOAD_POST_API_KEYS_URL
                 ),
-                key="upload_post_api_key_input"
             )
-            if upload_post_api_key != config.app.get("upload_post_api_key", ""):
-                _set_runtime_config("app", "upload_post_api_key", upload_post_api_key)
 
             upload_post_username = st.text_input(
                 tr("Upload-Post Profile Username"),
@@ -3381,7 +3433,11 @@ def _render_settings_dialog():
                 # 明确错误用于诊断损坏的 session state 或后续接入遗漏。
                 raise RuntimeError(f"unsupported llm provider: {llm_provider}")
 
-            llm_api_key = config.app.get(llm_provider_spec.config_key("api_key"), "")
+            llm_api_key = env_secrets.resolve(
+                "app",
+                llm_provider_spec.config_key("api_key"),
+                config.app.get(llm_provider_spec.config_key("api_key"), ""),
+            )
             configured_llm_base_url = config.app.get(
                 llm_provider_spec.config_key("base_url"), ""
             )
@@ -3490,11 +3546,12 @@ def _render_settings_dialog():
 
             st_llm_api_key = llm_api_key
             if llm_provider_spec.show_api_key:
-                st_llm_api_key = llm_form_panel.text_input(
+                st_llm_api_key = _render_server_secret_input(
                     tr("API Key"),
-                    value=llm_api_key,
-                    type="password",
-                    key=f"{llm_provider}_api_key_input",
+                    f"{llm_provider}_api_key_input",
+                    "app",
+                    llm_provider_spec.config_key("api_key"),
+                    container=llm_form_panel,
                 )
 
             st_llm_base_url = llm_base_url
@@ -3550,11 +3607,27 @@ def _render_settings_dialog():
                 )
             # 输入框展示 Registry 默认值，但配置只保存真实的用户覆盖值。
             # 这样默认模型、Base URL 更新后，未自定义的用户能够自动跟随。
-            _set_runtime_config(
-                "app",
-                llm_provider_spec.config_key("api_key"),
-                st_llm_api_key,
-            )
+            # The API key is saved by _render_server_secret_input (write-only).
+            env_managed_llm_fields = [
+                label
+                for label, suffix in (
+                    ("API Key", "api_key"),
+                    ("Base Url", "base_url"),
+                    ("Model Name", "model_name"),
+                    *(
+                        (field.label_key, field.config_suffix)
+                        for field in llm_provider_spec.extra_fields
+                    ),
+                )
+                if env_secrets.is_env_managed(
+                    "app", llm_provider_spec.config_key(suffix)
+                )
+            ]
+            if env_managed_llm_fields:
+                llm_form_panel.caption(
+                    "Overridden by server .env: "
+                    + ", ".join(tr(label) for label in env_managed_llm_fields)
+                )
             _set_runtime_config(
                 "app",
                 llm_provider_spec.config_key("base_url"),
@@ -3637,32 +3710,18 @@ def _render_settings_dialog():
                 st.markdown(f"#### {tr('Stock Video APIs')}")
                 st.caption(tr("Stock Video APIs Help"))
 
-                pexels_api_key = _get_material_api_keys("pexels_api_keys")
-                pixabay_api_key = _get_material_api_keys("pixabay_api_keys")
-                coverr_api_key = _get_material_api_keys("coverr_api_keys")
-                pexels_api_key = st.text_input(
-                    tr("Pexels API Key"),
-                    value=pexels_api_key,
-                    type="password",
-                    key="pexels_api_keys_input",
-                )
-                _save_material_api_keys("pexels_api_keys", pexels_api_key)
-
-                pixabay_api_key = st.text_input(
-                    tr("Pixabay API Key"),
-                    value=pixabay_api_key,
-                    type="password",
-                    key="pixabay_api_keys_input",
-                )
-                _save_material_api_keys("pixabay_api_keys", pixabay_api_key)
-
-                coverr_api_key = st.text_input(
-                    tr("Coverr API Key"),
-                    value=coverr_api_key,
-                    type="password",
-                    key="coverr_api_keys_input",
-                )
-                _save_material_api_keys("coverr_api_keys", coverr_api_key)
+                for material_label, material_key in (
+                    ("Pexels API Key", "pexels_api_keys"),
+                    ("Pixabay API Key", "pixabay_api_keys"),
+                    ("Coverr API Key", "coverr_api_keys"),
+                ):
+                    _render_server_secret_input(
+                        tr(material_label),
+                        f"{material_key}_input",
+                        "app",
+                        material_key,
+                        to_storage=_material_keys_to_storage,
+                    )
 
             with st.container(border=True):
                 st.markdown(f"#### {tr('AI Video Generation APIs')}")
@@ -4978,11 +5037,58 @@ def _render_loomloom_script_generation(params):
     _render_loomloom_candidates()
 
 
+def _render_content_agent():
+    with st.expander(tr("Autonomous AI Agent"), expanded=False):
+        st.caption(tr("Content Agent Help"))
+        topic = st.text_input(
+            tr("Content Agent Topic"),
+            key="content_agent_topic",
+            max_chars=2000,
+        )
+        language = stable_selectbox(
+            tr("Content Agent Language"),
+            options=support_locales,
+            default_value=config.ui.get("video_language") or "en-US",
+            key="content_agent_language",
+        )
+        if st.button(
+            tr("Auto-Generate Everything"),
+            key="content_agent_generate",
+            type="primary",
+            use_container_width=True,
+        ):
+            try:
+                with st.spinner(tr("Generating Content Package")):
+                    package = _run_llm_read_operation(
+                        "generate_complete_video_package",
+                        lambda snapshot: agent.generate_complete_video_package(
+                            topic, language, app_config=snapshot
+                        ),
+                    )
+            except agent.ContentAgentError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["video_subject"] = package["subject"]
+                st.session_state["video_script"] = package["script"]
+                st.session_state["video_terms"] = package["keywords"]
+                st.session_state["video_language"] = package["language"]
+                _set_stable_widget_value("script_language_select", package["language"])
+                st.session_state["content_agent_description"] = package["description"]
+                st.success(tr("Content Package Applied"))
+        if "content_agent_description" in st.session_state:
+            st.text_area(
+                tr("Content Agent Description"),
+                key="content_agent_description",
+                help=tr("Content Agent Description Help"),
+            )
+
+
 def _render_script_settings(panel, params):
     """渲染文案设置并更新生成参数。"""
     with panel:
         with st.container(border=True):
             st.write(tr("Video Script Settings"))
+            _render_content_agent()
             # 标签行需要容纳“配置大模型”入口，因此无法继续使用 text_area
             # 内置标签。把标签和输入框收进同一个字段容器后，可覆盖内部间距，
             # 同时让该字段与页面上的其它表单控件保持一致的外部节奏。
@@ -6513,41 +6619,31 @@ def _render_minimax_tts_settings() -> tuple[list[str], dict[str, str]]:
 
 def _sync_elevenlabs_api_key_input():
     """
-    同步 ElevenLabs 密码控件、持久化配置和环境变量，并返回当前有效 Key。
+    Persist a newly entered ElevenLabs key and return the effective server key.
 
-    Streamlit 在浏览器标签页连接到重启后的服务时，可能重放一个空的密码控件
-    状态。这个空值无法与用户主动清空可靠区分，因此当配置文件或环境变量仍有
-    Key 时，优先恢复有效值，防止空状态覆盖配置并确保本次 rerun 能立即加载
-    音色。需要彻底删除 Key 时应修改配置文件或环境变量，避免重连误判。
+    The server key (config.toml or ELEVENLABS_API_KEY) is never written into the
+    widget: Streamlit sends widget values to the browser, so pre-filling a
+    type="password" field would expose the key to any dashboard user via DevTools.
+    An empty field therefore means "use the server key". A newly typed key is
+    saved server-side and the field is cleared before it is rendered again.
+    Call this only before the widget is instantiated in the current run.
     """
     widget_key = "elevenlabs_api_key_input"
-    configured_key = str(config.elevenlabs.get("api_key", "") or "").strip()
-    env_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
-    effective_key = configured_key or env_key
-    had_widget_state = widget_key in st.session_state
+    server_key = voice.get_elevenlabs_api_key()
     entered_key = str(st.session_state.get(widget_key, "") or "").strip()
 
-    if not entered_key and effective_key:
-        # 重连后的空状态不能覆盖有效凭证，同时必须在渲染音色列表之前恢复，
-        # 否则配置文件虽然没有被清空，当前页面仍会使用空 Key 请求 ElevenLabs。
-        st.session_state[widget_key] = effective_key
-        entered_key = effective_key
-        if had_widget_state:
-            logger.debug("restored ElevenLabs API key after empty session replay")
-    elif not had_widget_state:
-        # 先初始化再创建控件，避免同时传 value 和 session_state 触发 Streamlit
-        # 的默认值冲突警告；没有任何 Key 时初始化为空即可。
-        st.session_state[widget_key] = entered_key
-
-    if entered_key and entered_key != effective_key:
-        # 用户主动输入的新值才落入 config.toml。环境变量作为有效值回填时不会
-        # 被复制到文件，容器或部署平台注入的密钥仍只保留在运行环境中。
+    if entered_key and entered_key != server_key:
         for cache_key in list(st.session_state.keys()):
             if str(cache_key).startswith("elevenlabs_voices_"):
                 del st.session_state[cache_key]
-        _set_runtime_config("elevenlabs", "api_key", entered_key)
+        # Saves are deferred while a render task holds the config lock; keep the
+        # user's own typed value in their session until the save is applied.
+        if _set_runtime_config("elevenlabs", "api_key", entered_key):
+            st.session_state[widget_key] = ""
+        return entered_key
 
-    return entered_key
+    st.session_state[widget_key] = ""
+    return server_key
 
 
 def _sync_voxcpm_api_key_input():
@@ -6578,12 +6674,14 @@ def _render_elevenlabs_api_key_input(label_key):
     后渲染的输入框还会覆盖共享配置。这里统一使用一个 key，并集中处理环境变量
     回填、配置更新和音色缓存失效，确保界面显示与后台任务始终读取同一个值。
     """
-    _sync_elevenlabs_api_key_input()
-    return st.text_input(
+    server_key = _sync_elevenlabs_api_key_input()
+    st.text_input(
         tr(label_key),
         type="password",
         key="elevenlabs_api_key_input",
-    ).strip()
+        placeholder="Configured on server" if server_key else "",
+    )
+    return server_key
 
 
 def _render_background_music_settings(params, elevenlabs_api_key_rendered=False):
@@ -6950,6 +7048,12 @@ def _render_audio_settings(panel, params):
             if saved_tts_server not in tts_server_values:
                 saved_tts_server = "azure-tts-v1"
 
+            if not st.session_state.get("tts_environment_default_applied", False):
+                if env_secrets.is_env_managed("elevenlabs", "api_key"):
+                    saved_tts_server = "elevenlabs"
+                    _set_stable_widget_value("tts_server_select", saved_tts_server)
+                st.session_state["tts_environment_default_applied"] = True
+
             if tts_mode_enabled:
                 selected_tts_server = stable_selectbox(
                     tr("Voiceover Service"),
@@ -7003,12 +7107,26 @@ def _render_audio_settings(panel, params):
                 # 音色列表位于 Key 输入框之前渲染，必须先统一恢复重连状态并读取
                 # 配置/环境变量，否则页面会用空 Key 加载并缓存空音色列表。
                 saved_elevenlabs_api_key = _sync_elevenlabs_api_key_input()
-                cache_key = f"elevenlabs_voices_{saved_elevenlabs_api_key}"
+                cache_key = (
+                    "elevenlabs_voices_"
+                    f"{_credential_signature(saved_elevenlabs_api_key)}"
+                )
                 if cache_key not in st.session_state:
                     st.session_state[cache_key] = voice.get_elevenlabs_voices(
                         saved_elevenlabs_api_key
                     )
-                filtered_voices = st.session_state[cache_key]
+                # Server default first, then curated catalog, then account voices
+                # (deduplicated by voice ID).
+                filtered_voices = [voice.ELEVENLABS_SERVER_DEFAULT_VOICE]
+                seen_voice_ids = set()
+                for candidate in (
+                    voice.get_elevenlabs_catalog_voices()
+                    + st.session_state[cache_key]
+                ):
+                    candidate_id = candidate.split(":", 2)[1]
+                    if candidate_id not in seen_voice_ids:
+                        seen_voice_ids.add(candidate_id)
+                        filtered_voices.append(candidate)
             elif selected_tts_server == "chatterbox":
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
@@ -8037,22 +8155,22 @@ def _render_generation_controls(
             st.error(tr("Please Select a Valid Video Source"))
             st.stop()
 
-        if params.video_source == "pexels" and not config.app.get(
-            "pexels_api_keys", ""
+        if params.video_source == "pexels" and not _get_material_api_keys(
+            "pexels_api_keys"
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pexels API Key"))
             st.stop()
 
-        if params.video_source == "pixabay" and not config.app.get(
-            "pixabay_api_keys", ""
+        if params.video_source == "pixabay" and not _get_material_api_keys(
+            "pixabay_api_keys"
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Pixabay API Key"))
             st.stop()
 
-        if params.video_source == "coverr" and not config.app.get(
-            "coverr_api_keys", ""
+        if params.video_source == "coverr" and not _get_material_api_keys(
+            "coverr_api_keys"
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
@@ -8371,7 +8489,30 @@ def _render_generation_controls(
 def _render_application():
     """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
     _render_top_bar()
+    from webui.components.accounts_manager import render_accounts_manager, render_account_targets
+    with st.sidebar:
+        st.header("Srz AutoFlow")
+        st.caption("Private multi-channel workspace")
+    creation_tab, accounts_tab, scheduler_tab, comments_tab = st.tabs(
+        ["Video Creation", "Accounts Manager", "Auto-Pilot Scheduler", "Social Comment Agent"],
+        key="srz_workspace_tabs",
+    )
+    with accounts_tab:
+        render_accounts_manager()
+    from webui.components.autopilot import render_autopilot_panel
 
+    with scheduler_tab:
+        render_autopilot_panel(tr)
+    from webui.components.comment_agent import render_comment_agent_panel
+
+    with comments_tab:
+        render_comment_agent_panel(tr)
+    with creation_tab:
+        _render_creation_workspace()
+
+
+def _render_creation_workspace():
+    from webui.components.accounts_manager import render_account_targets
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
 
@@ -8394,6 +8535,7 @@ def _render_application():
     right_panel = panel[3]
 
     params = VideoParams(video_subject="")
+    params.target_account_ids = render_account_targets("manual_target_accounts")
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)
     )
@@ -8420,4 +8562,5 @@ def _render_application():
         _save_runtime_config()
 
 
-_render_application()
+from webui.dashboard import main as render_autoflow
+render_autoflow(configure_page=False)

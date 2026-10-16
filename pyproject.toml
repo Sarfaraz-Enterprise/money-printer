@@ -13,10 +13,13 @@ readme = "README-en.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+    "APScheduler==3.11.0",
+    "pytz==2025.2",
+    "filelock==3.18.0",
     "moviepy==2.2.1",
     "streamlit==1.59.1",
     "streamlit-tour==1.1.0",
-    "edge-tts==7.2.7",
+    "edge-tts==7.3.1",
     "fastapi==0.136.3",
     "uvicorn==0.32.1",
     "openai==2.24.0",

@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from app.utils import utils
 from app.services import voice as vs
 from app.services import task as task_service
+from app.config import env_secrets
 from pydub import AudioSegment
 
 temp_dir = utils.storage_dir("temp")
@@ -45,8 +46,18 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
     "yes",
 }
                     
-class TestVoiceService(unittest.TestCase):
+class _PrivateDotenvTest(unittest.TestCase):
     def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="autoflow-test-env-")
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / ".env"
+        target.write_text("")
+        self.enterContext(patch.object(env_secrets, "DOTENV_PATH", target))
+
+
+class TestVoiceService(_PrivateDotenvTest):
+    def setUp(self):
+        super().setUp()
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
     
@@ -502,6 +513,7 @@ class TestVoiceService(unittest.TestCase):
         )
 
     def test_gemini_tts_uses_google_genai_and_compatible_submaker_fields(self):
+        env_secrets.DOTENV_PATH.write_text("GEMINI_API_KEY=test-key\n")
         """
         验证 Gemini TTS 在 edge_tts 7.x 环境下仍会返回项目兼容的字幕结构，
         并且可以被 `subtitle_provider=edge` 的字幕生成链路直接消费，
@@ -1031,6 +1043,7 @@ class TestVoiceService(unittest.TestCase):
         return _BrokenClip
 
     def test_elevenlabs_tts_audio_clip_closed_on_duration_error(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_API_KEY=test-key\n")
         """AudioFileClip.close() must be called even when reading .duration raises."""
         close_calls: list = []
         BrokenClip = self._make_broken_clip_class(close_calls)
@@ -1471,7 +1484,7 @@ def _write_test_wav(filepath: str, duration_seconds: float = 1.0, sample_rate: i
     return filepath
 
 
-class TestElevenLabsVoice(unittest.TestCase):
+class TestElevenLabsVoice(_PrivateDotenvTest):
 
     def test_is_elevenlabs_voice_true(self):
         self.assertTrue(vs.is_elevenlabs_voice("elevenlabs:pNInz6obpgDQGcFmaJgB:Adam"))
@@ -1536,6 +1549,7 @@ class TestElevenLabsVoice(unittest.TestCase):
     @patch("app.services.voice.AudioFileClip")
     @patch("app.services.voice.config")
     def test_elevenlabs_tts_success(self, mock_config, mock_clip_cls, mock_post):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_API_KEY=fake-api-key\n")
         mock_config.elevenlabs.get.return_value = "fake-api-key"
         mock_post.return_value.status_code = 200
         mock_post.return_value.content = b"fake-mp3-bytes"
@@ -1637,19 +1651,92 @@ class TestElevenLabsVoice(unittest.TestCase):
         result = vs.elevenlabs_tts("  ", "abc123", "/tmp/test.mp3")
         self.assertIsNone(result)
 
-    def test_elevenlabs_api_key_prefers_config(self):
+    def test_elevenlabs_api_key_prefers_dotenv(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_API_KEY=file-key\n")
         with (
             patch.object(vs.config, "elevenlabs", {"api_key": "config-key"}),
             patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key"}),
         ):
-            self.assertEqual(vs.get_elevenlabs_api_key(), "config-key")
+            self.assertEqual(vs.get_elevenlabs_api_key(), "file-key")
 
-    def test_elevenlabs_api_key_falls_back_to_environment(self):
+    def test_elevenlabs_api_key_rejects_config_fallback_when_file_empty(self):
+        with (
+            patch.object(vs.config, "elevenlabs", {"api_key": "config-key"}),
+            patch.dict(os.environ, {"ELEVENLABS_API_KEY": "  "}),
+        ):
+            self.assertEqual(vs.get_elevenlabs_api_key(), "")
+
+    def test_elevenlabs_api_key_ignores_inherited_environment(self):
         with (
             patch.object(vs.config, "elevenlabs", {"api_key": ""}),
             patch.dict(os.environ, {"ELEVENLABS_API_KEY": " env-key "}),
         ):
-            self.assertEqual(vs.get_elevenlabs_api_key(), "env-key")
+            self.assertEqual(vs.get_elevenlabs_api_key(), "")
+
+    def test_resolve_voice_uses_selected_catalog_voice(self):
+        with (
+            patch.object(vs.config, "elevenlabs", {}),
+            patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": "envDefault"}),
+        ):
+            self.assertEqual(len(vs.ELEVENLABS_VOICE_CATALOG), 6)
+            for catalog_voice in vs.get_elevenlabs_catalog_voices():
+                expected_id = catalog_voice.split(":", 2)[1]
+                self.assertEqual(vs.resolve_elevenlabs_voice_id(catalog_voice), expected_id)
+
+    def test_resolve_voice_falls_back_to_env_default_when_none_selected(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_VOICE_ID=envDefault\n")
+        with (
+            patch.object(vs.config, "elevenlabs", {}),
+            patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": " envDefault "}),
+        ):
+            for name in ("elevenlabs", "elevenlabs:", "elevenlabs::x", vs.ELEVENLABS_SERVER_DEFAULT_VOICE):
+                self.assertEqual(vs.resolve_elevenlabs_voice_id(name), "envDefault")
+
+    def test_resolve_voice_env_default_overrides_config(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_VOICE_ID=envDefault\n")
+        with (
+            patch.object(vs.config, "elevenlabs", {"voice_id": "cfgDefault"}),
+            patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": "envDefault"}),
+        ):
+            self.assertEqual(vs.resolve_elevenlabs_voice_id("elevenlabs:"), "envDefault")
+        env_secrets.DOTENV_PATH.write_text("")
+        with (
+            patch.object(vs.config, "elevenlabs", {"voice_id": "cfgDefault"}),
+            patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": ""}),
+        ):
+            self.assertEqual(vs.resolve_elevenlabs_voice_id("elevenlabs:"), "")
+
+    def test_resolve_voice_without_any_default_fails(self):
+        with (
+            patch.object(vs.config, "elevenlabs", {}),
+            patch.dict(os.environ, {}, clear=True),
+        ):
+            self.assertEqual(vs.resolve_elevenlabs_voice_id("elevenlabs:"), "")
+
+    def test_resolve_voice_rejects_path_injection(self):
+        with patch.object(vs.config, "elevenlabs", {}):
+            for bad in ("elevenlabs:../v2/user:x", "elevenlabs:a?b=c:x", "elevenlabs:a/b:x"):
+                self.assertEqual(vs.resolve_elevenlabs_voice_id(bad), "")
+
+    def test_tts_dispatch_passes_selected_or_default_voice_id(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_VOICE_ID=envDefault\n")
+        with (
+            patch.object(vs.config, "elevenlabs", {}),
+            patch.dict(os.environ, {"ELEVENLABS_VOICE_ID": "envDefault"}),
+            patch.object(vs, "elevenlabs_tts", return_value="ok") as tts,
+        ):
+            vs.tts("Hi", "elevenlabs:21m00Tcm4TlvDq8ikWAM:Rachel", 1.0, "out.mp3")
+            self.assertEqual(tts.call_args.args[1], "21m00Tcm4TlvDq8ikWAM")
+            vs.tts("Hi", vs.ELEVENLABS_SERVER_DEFAULT_VOICE, 1.0, "out.mp3")
+            self.assertEqual(tts.call_args.args[1], "envDefault")
+
+    def test_elevenlabs_tts_rejects_invalid_voice_id_without_calling_api(self):
+        with (
+            patch.object(vs, "get_elevenlabs_api_key", return_value="k"),
+            patch.object(vs.requests, "post") as post,
+        ):
+            self.assertIsNone(vs.elevenlabs_tts("Hello", "../x", "out.mp3"))
+        post.assert_not_called()
 
     def test_elevenlabs_api_key_matches_music_service(self):
         """TTS 和配乐共用同一账号配置，两条生成链路必须解析出相同 Key。"""

@@ -9,6 +9,7 @@ PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 )
 LOG_RECORD_FORMAT = (
+    "[Srz AutoFlow] "
     "<green>{time:%Y-%m-%d %H:%M:%S}</> | "
     "<level>{level}</> | "
     '"{file.path}:{line}":<blue> {function}</> '
@@ -73,8 +74,8 @@ def _project_relative_path(file_path):
     把绝对路径缩短为 ``./`` 开头、始终使用正斜杠的项目相对路径。
 
     Windows 上项目可能通过映射网络盘或 ``subst`` 盘启动。此时调用栈里的路径
-    仍是 ``X:\\MoneyPrinterTurbo\\...``，而 ``PROJECT_ROOT`` 经 ``realpath``
-    解析后落在 ``C:\\...``，``os.path.relpath`` 会直接抛出 ``ValueError``。
+    仍保留映射盘符，而 ``PROJECT_ROOT`` 经 ``realpath`` 解析后可能落在另一
+    个盘符下，``os.path.relpath`` 会直接抛出 ``ValueError``。
     格式化函数抛错会被 loguru 捕获并丢弃整条记录，终端和 WebUI 日志面板会
     同时变空，因此这里必须兜底返回原始路径。项目目录之外的文件同理：把
     ``./`` 拼到 ``..`` 回溯路径上只会得到更难读的结果。

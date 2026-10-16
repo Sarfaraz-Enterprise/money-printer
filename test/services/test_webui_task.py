@@ -244,8 +244,17 @@ def test_task_summary_tolerates_directory_removed_during_scan():
         ({"open_task_folder_on_completion": False}, 0),
     ],
 )
+@pytest.mark.parametrize(
+    ("filename", "download_name"),
+    [
+        ("final-1.mp4", "A day in Shanghai.mp4"),
+        ("manual/Top 5 AI Tools in 2026.mp4", "Top 5 AI Tools in 2026.mp4"),
+        ("manual/Top 5 AI Tools in 2026 2.mp4", "Top 5 AI Tools in 2026 2.mp4"),
+        ("manual/final-1.mp4", "final-1.mp4"),
+    ],
+)
 def test_completed_task_renders_subject_named_video_download(
-    tmp_path, ui_config, expected_open_count
+    tmp_path, ui_config, expected_open_count, filename, download_name
 ):
     """完成任务应提供成片下载，并按 WebUI 配置决定是否自动打开目录。"""
     tree = ast.parse(WEBUI_MAIN.read_text(encoding="utf-8"))
@@ -298,7 +307,8 @@ def test_completed_task_renders_subject_named_video_download(
         def error(self, _message):
             pass
 
-    video_path = tmp_path / "final-1.mp4"
+    video_path = tmp_path / filename
+    video_path.parent.mkdir(parents=True, exist_ok=True)
     video_path.write_bytes(b"video-content")
     fake_st = FakeStreamlit()
     open_task_folder = MagicMock()
@@ -341,7 +351,7 @@ def test_completed_task_renders_subject_named_video_download(
             "Download Video",
             b"video-content",
             {
-                "file_name": "A day in Shanghai.mp4",
+                "file_name": download_name,
                 "mime": "video/mp4",
                 "key": "download_generated_video_download-test_0",
                 "icon": ":material/download:",
@@ -482,7 +492,7 @@ def test_worker_logs_are_available_without_streamlit_session_state():
     records = webui_task.get_task_logs(task_id)
     assert len(records) == 1
     assert re.fullmatch(
-        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| "
+        r"\[Srz AutoFlow\] \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \| INFO \| "
         r'"\./test/services/test_webui_task\.py:\d+": logged_start '
         r"- unique background task log",
         records[0],
@@ -691,7 +701,7 @@ def test_generation_submit_skips_duplicate_config_save():
     application = next(
         node
         for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_render_application"
+        if isinstance(node, ast.FunctionDef) and node.name == "_render_creation_workspace"
     )
 
     assert isinstance(controls.body[-1], ast.Return)

@@ -48,6 +48,63 @@ def test_anthropic_workspace_setting_is_saved_and_available_to_connection_test()
         assert not app.exception
 
 
+def test_server_secrets_are_never_rendered_and_env_values_are_not_persisted():
+    """LLM, stock-media and Upload-Post keys stay on the server (config or .env)."""
+    import os
+
+    app_config = dict(
+        config.app,
+        llm_provider="anthropic",
+        anthropic_api_key="cfg-anthropic-secret",
+        pexels_api_keys=["cfg-pexels-secret"],
+        pixabay_api_keys=[],
+        upload_post_api_key="",
+    )
+    env = {
+        "PIXABAY_API_KEY": "env-pixabay-secret",
+        "UPLOAD_POST_API_KEY": "env-upload-secret",
+    }
+    with (
+        patch.object(config, "app", app_config),
+        patch.object(config, "ui", dict(config.ui, language="en")),
+        patch.object(config, "try_save_config", return_value=True),
+        patch.dict(os.environ, env),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=60)
+        app.session_state["ui_language"] = "en"
+        app.session_state["settings_dialog_open"] = True
+        app.run()
+        assert not app.exception
+        for key in (
+            "anthropic_api_key_input",
+            "pexels_api_keys_input",
+            "pixabay_api_keys_input",
+            "upload_post_api_key_input",
+        ):
+            widget = _widget_by_key(app.text_input, key)
+            assert widget.value == ""
+            assert widget.proto.type == widget.proto.PASSWORD
+        rendered = str(app.get("text_input"))
+        for secret in (
+            "cfg-anthropic-secret",
+            "cfg-pexels-secret",
+            "env-pixabay-secret",
+            "env-upload-secret",
+        ):
+            assert secret not in rendered
+        # Env-sourced values are resolved at read time, never copied to config.
+        assert app_config["pixabay_api_keys"] == []
+        assert app_config["upload_post_api_key"] == ""
+        assert app_config["anthropic_api_key"] == "cfg-anthropic-secret"
+
+        _widget_by_key(app.text_input, "anthropic_api_key_input").set_value(
+            "new-anthropic-key"
+        ).run()
+        assert app_config["anthropic_api_key"] == "new-anthropic-key"
+        assert _widget_by_key(app.text_input, "anthropic_api_key_input").value == ""
+        assert not app.exception
+
+
 def test_fluxionai_settings_defaults_and_connection_button():
     """真实运行 Streamlit 组件：检查默认值、配置覆盖及连接测试入口，不写用户配置。"""
     app_config = dict(

@@ -1,0 +1,22 @@
+[Unit]
+Description=Srz AutoFlow Streamlit dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+Group=ec2-user
+WorkingDirectory=/home/ec2-user/MoneyPrinterTurbo
+EnvironmentFile=/home/ec2-user/MoneyPrinterTurbo/.env
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/home/ec2-user/MoneyPrinterTurbo/.venv/bin/python -m streamlit run webui.py --server.headless true --server.address 0.0.0.0 --server.port 8501 --browser.gatherUsageStats false
+Restart=always
+RestartSec=5
+TimeoutStopSec=60
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -3,17 +3,31 @@ import errno
 import os
 import shutil
 import socket
+import sys
 import tempfile
 import threading
 from contextlib import contextmanager
+from pathlib import Path
 
 import toml
 from loguru import logger
 
 from app import __version__
+from app.utils.logging_utils import configure_terminal_logger
 
-root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
-config_file = f"{root_dir}/config.toml"
+configure_terminal_logger(sys.stderr, "INFO", colorize=False)
+
+root_dir = str(Path(__file__).resolve().parents[2])
+config_file = str(Path(root_dir) / "config.toml")
+
+# Server-side secrets (e.g. ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID) may live in
+# a git-ignored .env file. Real process environment variables always win.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(root_dir, ".env"), override=False)
+except ImportError:
+    pass
 _CONTAINER_CGROUP_MARKERS = ("docker", "containerd", "kubepods", "libpod", "podman")
 _DOCKER_HOST_GATEWAY_NAME = "host.docker.internal"
 _config_save_lock = threading.RLock()
@@ -633,11 +647,8 @@ hostname = socket.gethostname()
 log_level = _cfg.get("log_level", "DEBUG")
 listen_host = _cfg.get("listen_host", "0.0.0.0")
 listen_port = _cfg.get("listen_port", 8080)
-project_name = _cfg.get("project_name", "MoneyPrinterTurbo")
-project_description = _cfg.get(
-    "project_description",
-    "<a href='https://github.com/harry0703/MoneyPrinterTurbo'>https://github.com/harry0703/MoneyPrinterTurbo</a>",
-)
+project_name = "Srz AutoFlow"
+project_description = "Autonomous Multi-Channel Content & Distribution Engine"
 project_version = _cfg.get("project_version", __version__)
 reload_debug = False
 

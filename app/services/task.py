@@ -8,11 +8,14 @@ import tempfile
 import threading
 import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from datetime import datetime, timezone
 from functools import partial
 from os import path
+from pathlib import Path
 from uuid import uuid4
 
 from loguru import logger
+from filelock import FileLock
 
 from app.config import config
 from app.models import const
@@ -36,7 +39,7 @@ from app.services import (
 )
 from app.services import upload_post
 from app.services import state as sm
-from app.utils import file_security, utils
+from app.utils import file_security, utils, video_outputs
 from app.utils.subtitle_writer import staged_subtitle_file
 
 
@@ -257,6 +260,13 @@ def _mark_task_failed(
     details: dict | None = None,
 ) -> dict:
     """记录结构化失败信息，并保留任务失败前已经到达的进度。"""
+    from app.services import job_store
+    if job_store.get_job(task_id) is None:
+        job_store.record_job({
+            "job_id": task_id, "profile_id": "", "status": "running",
+            "stage": stage, "attempts": 1, "started_at": datetime.now(timezone.utc).isoformat(),
+        })
+    job_store.stage_fail(task_id, stage, "task_failed", f"Task failed during {stage}.")
     existing_task = None
     try:
         existing_task = sm.state.get_task(task_id)
@@ -297,6 +307,28 @@ def _mark_task_failed(
         **failure_details,
     )
     return failure
+
+
+def _checkpointed_call(task_id, stage, input_data, operation):
+    from app.services import job_store
+    cached = job_store.cached_output(task_id, stage, input_data)
+    if cached is not None:
+        return cached, True
+    job_store.stage_begin(task_id, stage, input_data)
+    try:
+        output = operation()
+    except Exception as exc:
+        job_store.stage_fail(task_id, stage, type(exc).__name__, f"Stage {stage} failed.")
+        raise
+    return output, False
+
+
+def _checkpoint_stage(task_id, stage, output, input_data, *, artifacts=None, cacheable=True):
+    from app.services import job_store
+    job_store.stage_succeed(
+        task_id, stage, output, input_data=input_data,
+        artifacts=artifacts, cacheable=cacheable,
+    )
 
 
 def _stage_progress_reporter(task_id: str, stage_start: float, stage_end: float):
@@ -1097,37 +1129,54 @@ def generate_final_videos(
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
 
-        final_video_paths.append(final_video_path)
+        exported_path = _export_final_video(
+            final_video_path, params.video_subject, params.output_category, params.profile_id
+        )
+        final_video_paths.append(exported_path)
         combined_video_paths.append(combined_video_path)
-        try:
-            exported_path = _export_final_video(final_video_path)
-            if exported_path:
-                logger.info(f"Final video exported: {exported_path}")
-        except OSError as exc:
-            logger.warning(f"Final video export failed; original retained: {exc}")
-            warnings.append({"code": "final_video_export_failed", "video_index": index})
+        logger.info(f"Final video exported: {exported_path}")
 
     return final_video_paths, combined_video_paths, warnings
 
 
-def _export_final_video(final_video_path: str) -> str:
-    export_root = str(config.app.get("final_video_export_dir") or "").strip()
-    if not export_root:
-        return ""
-    task_id = path.basename(path.dirname(final_video_path))
-    destination_dir = path.join(path.expanduser(export_root), task_id)
-    os.makedirs(destination_dir, exist_ok=True)
-    destination = path.join(destination_dir, path.basename(final_video_path))
-    descriptor, temporary_path = tempfile.mkstemp(
-        prefix=".export-", suffix=".mp4", dir=destination_dir
+def _export_final_video(
+    final_video_path: str, subject: str = "", category: str = "manual", profile_id: str = ""
+) -> str:
+    destination_dir = (
+        video_outputs.profile_dir(profile_id) if profile_id else video_outputs.category_dir(category)
     )
-    os.close(descriptor)
-    try:
-        shutil.copyfile(final_video_path, temporary_path)
-        os.replace(temporary_path, destination)
-    finally:
-        if path.exists(temporary_path):
-            os.remove(temporary_path)
+    base = (
+        time.strftime("%Y-%m-%d") + "_" + video_outputs.subject_slug(subject)
+        if profile_id else video_outputs.clean_subject(subject)
+    )
+    pattern = re.compile(rf"^{re.escape(base)} (\d+)\.mp4$", re.IGNORECASE)
+    # Cross-process locking also covers backend, scheduler and Streamlit workers.
+    with FileLock(path.join(destination_dir, ".output.lock"), timeout=60):
+        names = os.listdir(destination_dir)
+        numbers = [
+            int(match.group(1))
+            for name in names
+            if (match := pattern.fullmatch(name))
+        ]
+        occupied = {name.casefold() for name in names}
+        filename = f"{base}.mp4"
+        if filename.casefold() in occupied or numbers:
+            number = max([1, *numbers]) + 1
+            filename = f"{base} {number}.mp4"
+            while filename.casefold() in occupied:
+                number += 1
+                filename = f"{base} {number}.mp4"
+        destination = path.join(destination_dir, filename)
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=".export-", suffix=".tmp", dir=destination_dir
+        )
+        os.close(descriptor)
+        try:
+            shutil.copyfile(final_video_path, temporary_path)
+            os.replace(temporary_path, destination)
+        finally:
+            if path.exists(temporary_path):
+                os.remove(temporary_path)
     return destination
 
 
@@ -1252,6 +1301,7 @@ def _run_cross_post(
     youtube_privacy_status: str,
     youtube_made_for_kids: bool = False,
     upload_account: dict | None = None,
+    target_account_ids: tuple[str, ...] = (),
 ) -> None:
     """后台执行跨平台发布，并只补充发布相关的任务字段。"""
     results = []
@@ -1277,6 +1327,43 @@ def _run_cross_post(
         logger.info(
             f"cross-post started, task_id: {task_id}, platforms: {', '.join(platforms)}"
         )
+        if target_account_ids:
+            from app.services import job_store
+            from app.services.account_dispatcher import dispatch_video
+
+            job_store.record_job({
+                "job_id": task_id, "profile_id": target_account_ids[0],
+                "status": "running", "stage": "publish", "attempts": 1,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            })
+
+            for video_path in video_paths:
+                job_store.record_artifact(task_id, "final_video", video_path)
+                results.extend(dispatch_video(
+                    video_path, video_subject, video_script,
+                    list(target_account_ids), job_id=task_id,
+                ))
+            if not results:
+                results.append({"success": False, "error": "No account destinations were dispatched."})
+            failures = [result for result in results if not result.get("success")]
+            _patch_cross_post_state(
+                task_id,
+                cross_post_state=(
+                    const.CROSS_POST_STATE_FAILED if failures
+                    else const.CROSS_POST_STATE_COMPLETE
+                ),
+                cross_post_results=results,
+                cross_post_error="Some account destinations failed; inspect per-account results." if failures else None,
+                cross_post_owner=None,
+            )
+            job = job_store.get_job(task_id)
+            if job is not None:
+                job.update(
+                    status="partial_failure" if failures else "complete",
+                    stage="publish", finished_at=datetime.now(timezone.utc).isoformat(),
+                )
+                job_store.record_job(job)
+            return
         youtube_extra = None
         post_title = video_subject or "Check out this video! #shorts #viral"
         if platforms:
@@ -1397,6 +1484,19 @@ def _run_cross_post(
         # 异常原文写入任务状态，API 调用方无需访问服务端日志也能定位问题。
         logger.exception(f"cross-post failed, task_id: {task_id}, error: {exc}")
         _record_cross_post_failure(task_id, exc, results)
+        if target_account_ids:
+            try:
+                from app.services import job_store
+                job = job_store.get_job(task_id)
+                if job is not None:
+                    job.update(
+                        status="partial_failure", stage="publish",
+                        error_type=type(exc).__name__,
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    job_store.record_job(job)
+            except Exception as ledger_exc:
+                logger.error("Failed to persist account dispatch result: {}", type(ledger_exc).__name__)
 
 
 def _run_cross_post_with_slot(*args) -> None:
@@ -1476,12 +1576,13 @@ def _schedule_cross_post(
             task_id,
             tuple(video_paths),
             params.video_subject or "",
-            video_script,
+            (params.video_description or video_script) if params.target_account_ids else video_script,
             params.video_language or "",
             tuple(platforms),
             youtube_privacy_status,
             youtube_made_for_kids,
-            upload_post.upload_post_service.snapshot_account(),
+            None if params.target_account_ids else upload_post.upload_post_service.snapshot_account(),
+            *([tuple(params.target_account_ids)] if params.target_account_ids else []),
         )
         _register_cross_post_future(task_id, future)
         future.add_done_callback(partial(_finalize_cross_post_future, task_id))
@@ -1512,8 +1613,33 @@ def _run_pipeline(
     voxcpm_reference_audio: bytes | None = None,
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
+    auto_publish: bool = True,
+    ledger_parent_job_id: str | None = None,
 ):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    from app.services import job_store
+    if job_store.get_job(task_id) is None:
+        job_store.record_job({
+            "job_id": task_id, "profile_id": str(params.profile_id or ""),
+            "parent_job_id": ledger_parent_job_id,
+            "status": "running", "stage": "preflight", "attempts": 1,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        })
+    else:
+        job_store.record_job({
+            "job_id": task_id, "profile_id": str(params.profile_id or ""),
+            "parent_job_id": ledger_parent_job_id,
+            "status": "running", "stage": "preflight",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        })
+    preflight_inputs = {
+        "video_source": params.video_source,
+        "stop_at": stop_at,
+        "bgm_type": params.bgm_type,
+        "bgm_volume": params.bgm_volume,
+    }
+    if job_store.cached_output(task_id, "preflight", preflight_inputs) is None:
+        job_store.stage_begin(task_id, "preflight", preflight_inputs)
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None,
@@ -1634,8 +1760,21 @@ def _run_pipeline(
             "in config.toml to a working ffmpeg executable",
         )
 
+    if job_store.cached_output(task_id, "preflight", preflight_inputs) is None:
+        _checkpoint_stage(task_id, "preflight", {"status": "passed"}, preflight_inputs)
+
     # 1. Generate script
-    video_script = generate_script(task_id, params)
+    script_inputs = {
+        "subject": params.video_subject,
+        "provided_script": params.video_script,
+        "language": params.video_language,
+        "provider": config.app.get("llm_provider"),
+        "stop_at": stop_at,
+    }
+    script_result, script_cached = _checkpointed_call(
+        task_id, "script", script_inputs, lambda: generate_script(task_id, params)
+    )
+    video_script = script_result.get("script", "") if script_cached else script_result
     # The LLM adapter uses a leading "Error: " as its failure sentinel. A
     # user-provided script may legitimately quote that text anywhere, including
     # at the beginning, so only interpret it for an LLM-generated script.
@@ -1651,6 +1790,8 @@ def _run_pipeline(
             else "failed to generate video script"
         )
         return _mark_task_failed(task_id, "script", error)
+    if not script_cached:
+        _checkpoint_stage(task_id, "script", {"script": video_script}, script_inputs)
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 
@@ -1661,15 +1802,22 @@ def _run_pipeline(
         return {"script": video_script}
 
     # 2. Generate terms
-    video_terms = ""
-    if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
-            return _mark_task_failed(
-                task_id,
-                "terms",
-                "failed to generate video search terms",
-            )
+    terms_inputs = {
+        "script": video_script,
+        "video_source": params.video_source,
+        "subject": params.video_subject,
+        "language": params.video_language,
+    }
+    def create_terms():
+        if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
+            return generate_terms(task_id, params, video_script)
+        return ""
+    terms_result, terms_cached = _checkpointed_call(task_id, "terms", terms_inputs, create_terms)
+    video_terms = terms_result.get("terms", "") if terms_cached else terms_result
+    if stop_at in {"terms", "materials", "video"} and params.video_source != "local" and not video_terms:
+        return _mark_task_failed(task_id, "terms", "failed to generate video search terms")
+    if not terms_cached:
+        _checkpoint_stage(task_id, "terms", {"terms": video_terms}, terms_inputs)
 
     save_script_data(task_id, video_script, video_terms, params)
 
@@ -1691,17 +1839,48 @@ def _run_pipeline(
     if voxcpm_prompt_audio is not None:
         generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
         generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        **generate_audio_kwargs,
+    audio_inputs = {
+        "script": video_script,
+        "voice_name": params.voice_name,
+        "voice_rate": params.voice_rate,
+        "voice_volume": params.voice_volume,
+        "custom_audio_file": getattr(params, "custom_audio_file", None),
+        "subtitle_provider": config.app.get("subtitle_provider", "edge"),
+    }
+    may_reuse_audio = (
+        stop_at == "audio"
+        or not params.subtitle_enabled
+        or str(config.app.get("subtitle_provider", "edge")).strip().lower() == "whisper"
     )
+    audio_result, audio_cached = _checkpointed_call(
+        task_id, "audio", audio_inputs,
+        lambda: generate_audio(
+            task_id, params, video_script, **generate_audio_kwargs,
+        ),
+    ) if may_reuse_audio else (None, False)
+    if audio_cached:
+        audio_file = audio_result["audio_file"]
+        audio_duration = audio_result["audio_duration"]
+        sub_maker = None
+    else:
+        if not may_reuse_audio:
+            job_store.stage_begin(task_id, "audio", audio_inputs)
+            audio_result = generate_audio(
+                task_id, params, video_script, **generate_audio_kwargs,
+            )
+        audio_file, audio_duration, sub_maker = audio_result
     if not audio_file:
         return _mark_task_failed(
             task_id,
             "audio",
             "failed to prepare narration audio",
+        )
+    if not audio_cached:
+        audio_cacheable = may_reuse_audio or stop_at == "audio"
+        audio_output = {"audio_file": audio_file, "audio_duration": audio_duration}
+        _checkpoint_stage(
+            task_id, "audio", audio_output, audio_inputs,
+            artifacts={"narration": audio_file}, cacheable=audio_cacheable,
         )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
@@ -1736,9 +1915,22 @@ def _run_pipeline(
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
+    subtitle_inputs = {
+        "script": video_script,
+        "audio_file": audio_file,
+        "subtitle_provider": config.app.get("subtitle_provider", "edge"),
+        "subtitle_enabled": params.subtitle_enabled,
+    }
+    subtitle_result, subtitle_cached = _checkpointed_call(
+        task_id, "subtitle", subtitle_inputs,
+        lambda: generate_subtitle(task_id, params, video_script, sub_maker, audio_file),
     )
+    subtitle_path = subtitle_result.get("subtitle_path", "") if subtitle_cached else subtitle_result
+    if not subtitle_cached:
+        _checkpoint_stage(
+            task_id, "subtitle", {"subtitle_path": subtitle_path}, subtitle_inputs,
+            artifacts={"captions": subtitle_path} if subtitle_path else {},
+        )
 
     if stop_at == "subtitle":
         if not subtitle_path:
@@ -1758,18 +1950,37 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
+    materials_inputs = {
+        "terms": video_terms,
+        "source": params.video_source,
+        "aspect": params.video_aspect,
+        "duration": audio_duration,
+        "profile_id": params.profile_id,
+    }
+    materials_result, materials_cached = _checkpointed_call(
+        task_id, "materials", materials_inputs,
+        lambda: get_video_materials(
+            task_id, params, video_terms, audio_duration,
+            loomloom_video_request=loomloom_video_request,
+        ),
     )
+    downloaded_videos = materials_result.get("materials", []) if materials_cached else materials_result
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
             "materials",
             "failed to prepare video materials",
+        )
+    if not materials_cached:
+        material_artifacts = {
+            f"material-{index}": material_path
+            for index, material_path in enumerate(downloaded_videos)
+            if isinstance(material_path, str) and Path(material_path).is_file()
+        }
+        _checkpoint_stage(
+            task_id, "materials", {"materials": downloaded_videos}, materials_inputs,
+            artifacts=material_artifacts,
+            cacheable=len(material_artifacts) == len(downloaded_videos),
         )
 
     if stop_at == "materials":
@@ -1789,22 +2000,44 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
-    final_video_paths, combined_video_paths, generation_warnings = (
-        generate_final_videos(
-            task_id,
-            params,
-            downloaded_videos,
-            audio_file,
-            subtitle_path,
-            audio_duration,
-        )
+    render_inputs = {
+        "materials": downloaded_videos,
+        "audio_file": audio_file,
+        "subtitle_path": subtitle_path,
+        "params": params.model_dump(warnings=False),
+    }
+    render_result, render_cached = _checkpointed_call(
+        task_id, "render", render_inputs,
+        lambda: generate_final_videos(
+            task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
+        ),
     )
+    if render_cached:
+        final_video_paths = render_result["videos"]
+        combined_video_paths = render_result.get("combined_videos", [])
+        generation_warnings = render_result.get("warnings", [])
+    else:
+        final_video_paths, combined_video_paths, generation_warnings = render_result
 
     if not final_video_paths:
         return _mark_task_failed(
             task_id,
             "video",
             "failed to generate final video",
+        )
+    if not render_cached:
+        render_artifacts = {
+            f"final-{index}": video_path
+            for index, video_path in enumerate(final_video_paths, 1)
+            if Path(video_path).is_file()
+        }
+        _checkpoint_stage(
+            task_id, "render", {
+                "videos": final_video_paths,
+                "combined_videos": combined_video_paths,
+                "warnings": generation_warnings,
+            }, render_inputs, artifacts=render_artifacts,
+            cacheable=len(render_artifacts) == len(final_video_paths),
         )
 
     logger.success(
@@ -1813,12 +2046,15 @@ def _run_pipeline(
 
     # 7. 先完成视频生成任务，再按需提交跨平台发布。第三方上传可能耗时
     # 数分钟，不应阻塞视频结果返回，也不能反向影响已经生成的成片。
-    cross_post_enabled = (
-        upload_post.upload_post_service.is_configured()
+    account_publish = auto_publish and bool(params.target_account_ids)
+    cross_post_enabled = account_publish or (
+        auto_publish
+        and upload_post.upload_post_service.is_configured()
         and upload_post.upload_post_service.auto_upload
     )
     platforms = (
-        list(upload_post.upload_post_service.platforms) if cross_post_enabled else []
+        ["accounts"] if account_publish
+        else list(upload_post.upload_post_service.platforms) if cross_post_enabled else []
     )
     should_cross_post = cross_post_enabled and bool(platforms)
     if cross_post_enabled and not platforms:
@@ -1831,6 +2067,7 @@ def _run_pipeline(
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
         "script": video_script,
+        "video_description": params.video_description,
         "terms": video_terms,
         "audio_file": audio_file,
         "audio_duration": audio_duration,
@@ -1881,6 +2118,8 @@ def start(
     voxcpm_reference_audio: bytes | None = None,
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
+    auto_publish: bool = True,
+    ledger_parent_job_id: str | None = None,
 ):
     """
     执行任务流水线，并确保未预期异常也会转换成可查询的失败状态。
@@ -1889,7 +2128,7 @@ def start(
     默认值，让自定义音频始终受当前任务目录约束。
     """
     try:
-        return _run_pipeline(
+        result = _run_pipeline(
             task_id,
             params,
             stop_at=stop_at,
@@ -1899,7 +2138,16 @@ def start(
             voxcpm_reference_audio=voxcpm_reference_audio,
             voxcpm_prompt_audio=voxcpm_prompt_audio,
             voxcpm_prompt_text=voxcpm_prompt_text,
+            auto_publish=auto_publish,
+            ledger_parent_job_id=ledger_parent_job_id,
         )
+        task_state = sm.state.get_task(task_id) or {}
+        if task_state.get("state") == const.TASK_STATE_COMPLETE:
+            cross_post_state = task_state.get("cross_post_state")
+            if cross_post_state not in _ACTIVE_CROSS_POST_STATES:
+                from app.services import job_store
+                job_store.set_job(task_id, "complete")
+        return result
     except Exception as exc:
         logger.exception(
             f"unexpected task pipeline failure, task_id: {task_id}, error: {exc}"

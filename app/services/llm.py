@@ -13,7 +13,7 @@ from loguru import logger
 from openai import AzureOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
-from app.config import config
+from app.config import config, env_secrets
 from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
 from app.utils import utils
 
@@ -254,6 +254,18 @@ def _extract_qwen_generation_text(response) -> str:
     return _normalize_text_response(text, "qwen")
 
 
+def gateway_configuration_preview() -> dict:
+    """Describe the proposed gateway without creating a client or making requests."""
+    settings = env_secrets.gateway_preview_settings()
+    return {
+        **settings,
+        "provider": "DeepSeek V4 Pro (APInex Gateway - " + settings["model"] + ")",
+        "credential_present": bool(env_secrets.global_value("OPENAI_API_KEY")),
+        "active": False,
+        "status": "Local configuration only; gateway routing and network validation disabled",
+    }
+
+
 def _generate_response(prompt: str, app_config=None) -> str:
     sdk_client = None
     sdk_stream = None
@@ -270,17 +282,22 @@ def _generate_response(prompt: str, app_config=None) -> str:
             raise ValueError(f"{llm_provider}: unsupported llm provider")
 
         logger.info(f"llm provider: {llm_provider}")
-        api_key = runtime_app_config.get(provider.config_key("api_key"), "")
-        configured_model = runtime_app_config.get(provider.config_key("model_name"), "")
+
+        def _setting(suffix, default=""):
+            key = provider.config_key(suffix)
+            return env_secrets.resolve(
+                "app", key, runtime_app_config.get(key, default)
+            )
+
+        api_key = _setting("api_key")
+        configured_model = _setting("model_name")
         model_name = provider.resolve_model_name(configured_model)
         if configured_model and model_name != configured_model:
             logger.warning(
                 f"{llm_provider} model '{configured_model}' is deprecated, "
                 f"fallback to '{model_name}'"
             )
-        configured_base_url = runtime_app_config.get(
-            provider.config_key("base_url"), ""
-        )
+        configured_base_url = _setting("base_url")
         base_url = provider.resolve_base_url(configured_base_url)
         if configured_base_url and configured_base_url.strip().rstrip("/") in {
             url.rstrip("/") for url in provider.deprecated_base_urls
@@ -306,7 +323,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
 
         extra_values = {
             field.config_suffix: _resolve_provider_field_value(
-                runtime_app_config.get(provider.config_key(field.config_suffix)),
+                _setting(field.config_suffix, None),
                 field.default_value,
             )
             for field in provider.extra_fields
@@ -624,7 +641,7 @@ def _generate_response(prompt: str, app_config=None) -> str:
         default_headers = {}
         if llm_provider == "anthropic":
             workspace_id = str(
-                runtime_app_config.get("anthropic_workspace_id") or ""
+                _setting("workspace_id") or ""
             ).strip()
             if workspace_id:
                 default_headers["anthropic-workspace-id"] = workspace_id

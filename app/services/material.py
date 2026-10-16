@@ -18,7 +18,7 @@ from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from PIL import Image, UnidentifiedImageError
 
-from app.config import config
+from app.config import config, env_secrets
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.services import (
     material_cache,
@@ -199,11 +199,11 @@ def _get_tls_verify() -> bool:
 
 
 def get_api_key(cfg_key: str):
-    api_keys = config.app.get(cfg_key)
+    api_keys = env_secrets.resolve("app", cfg_key, config.app.get(cfg_key))
     if not api_keys:
         raise ValueError(
             f"\n\n##### {cfg_key} is not set #####\n\n"
-            f"Please set it in the config.toml file: {config.config_file}\n"
+            f"Please set it in the .env file or config.toml: {config.config_file}\n"
         )
 
     # if only one key is provided, return it

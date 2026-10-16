@@ -36,7 +36,7 @@ from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
 from app.services import state as sm
 from app.services import task as tm
-from app.utils import file_security, utils
+from app.utils import file_security, utils, video_outputs
 
 # 统一在 V1 视频路由入口执行鉴权。verify_token 会在 api_key 为空时
 # 保留现有免认证行为，只有管理员显式配置后才会影响客户端。
@@ -118,6 +118,19 @@ def _task_file_to_uri(file: str, endpoint: str, task_dir: str, request_id: str) 
 
     if file.startswith(("http://", "https://")):
         return file
+
+    try:
+        output_path = file_security.resolve_path_within_directory(
+            video_outputs.output_root(), file
+        )
+    except ValueError:
+        output_path = None
+    if output_path is not None:
+        relative = os.path.relpath(output_path, video_outputs.output_root()).replace("\\", "/")
+        parts = relative.split("/")
+        if len(parts) == 2 and video_outputs.valid_output_folder(parts[0]) and parts[1].endswith(".mp4"):
+            uri = f"/api/v1/stream/outputs/{quote(relative, safe='/')}"
+            return f"{endpoint.rstrip('/')}{uri}" if endpoint else uri
 
     try:
         resolved_path = file_security.resolve_path_within_directory(task_dir, file)
@@ -499,11 +512,30 @@ def upload_video_material_file(request: Request, file: UploadFile = File(...)):
     response = {"file": stored_filename}
     return utils.get_response(200, response)
 
+def _resolve_video_artifact(file_path: str, request_id: str) -> str:
+    normalized = file_path.replace("\\", "/")
+    if normalized.startswith("outputs/"):
+        relative = normalized[len("outputs/"):]
+        parts = relative.split("/")
+        if (
+            len(parts) != 2
+            or not video_outputs.valid_output_folder(parts[0])
+            or not parts[1].endswith(".mp4")
+        ):
+            raise HttpException(
+                task_id=request_id, status_code=400,
+                message=f"{request_id}: invalid output path",
+            )
+        return _resolve_path_within_directory(
+            video_outputs.output_root(), relative, request_id
+        )
+    return _resolve_path_within_directory(utils.task_dir(), file_path, request_id)
+
+
 @router.get("/stream/{file_path:path}")
 async def stream_video(request: Request, file_path: str):
     request_id = base.get_task_id(request)
-    tasks_dir = utils.task_dir()
-    video_path = _resolve_path_within_directory(tasks_dir, file_path, request_id)
+    video_path = _resolve_video_artifact(file_path, request_id)
     range_header = request.headers.get("Range")
     # The body is produced after this handler returns. Open now so a task
     # deletion or replacement between headers and iteration cannot make the
@@ -560,8 +592,7 @@ async def download_video(request: Request, file_path: str):
     :return: video file
     """
     request_id = base.get_task_id(request)
-    tasks_dir = utils.task_dir()
-    video_path = _resolve_path_within_directory(tasks_dir, file_path, request_id)
+    video_path = _resolve_video_artifact(file_path, request_id)
     file_path = pathlib.Path(video_path)
     filename = file_path.name
     media_type, _ = mimetypes.guess_type(filename)

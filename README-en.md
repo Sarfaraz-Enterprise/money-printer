@@ -1,8 +1,13 @@
 <div align="center">
 
-# MoneyPrinterTurbo 💸
+# Srz AutoFlow ⚡
 
-### An All-in-One AI Short Video Generator
+### Autonomous Multi-Channel Content & Distribution Engine
+
+The in-house workspace is now **Srz AutoFlow**. See
+[Profiles, story memory, system health and autonomous schedules](docs/srz-automation.md)
+for setup and private credential storage. Rendering remains compatible with the
+upstream project; original upstream attribution and license are retained below.
 
 Provide a video <b>topic</b> or <b>keyword</b>, and MoneyPrinterTurbo will generate the script, match footage, create subtitles and background music, and produce an HD short video.
 
@@ -199,6 +204,19 @@ Thanks to [Kimi](https://platform.kimi.ai?track_id=track-9e3b711aa2594e378f6fe5b
 - [x] Use random, local, or AI-generated background music with independent volume control
 
 ### Output and Publishing
+
+Final videos use `storage/outputs/manual/`, `storage/outputs/scheduled/`, or
+`storage/outputs/fully_automatic/` (comment-driven autonomous runs). Set
+`app.final_video_export_dir` to override the root. Filenames preserve the Video Subject's spaces and safe punctuation, e.g.
+`Top 5 AI Tools in 2026.mp4`. Duplicates use `Top 5 AI Tools in 2026 2.mp4`,
+then `3`, etc., per category. Invalid OS characters are replaced with spaces,
+leading/trailing whitespace and Windows-unsafe trailing dots are removed, and
+reserved Windows device names are prefixed with `_`. Empty subjects use
+`Auto_Video`. Subjects are not truncated or replaced with IDs. Numbering
+is protected across processes. Task copies and old history remain intact.
+Previews and publishers receive the new absolute path; API stream/download
+routes also support `outputs/<category>/<filename>` under existing authentication.
+Restart Streamlit, the backend, and standalone automation workers after updating.
 
 - [x] Export portrait `9:16 (1080×1920)`, landscape `16:9 (1920×1080)`, or square `1:1 (1080×1080)` videos
 - [x] Publish completed videos directly to **TikTok, Instagram, and YouTube Shorts**
@@ -464,6 +482,184 @@ The summary contains `total`, `succeeded`, `failed`, and `tasks`; each task entr
 **Azure TTS V1** in the WebUI is powered by **Edge TTS** and is free to use without an API key. MoneyPrinterTurbo also supports **Azure TTS V2**, **SiliconFlow TTS**, **Google Gemini TTS**, **Xiaomi MiMo TTS**, **MiniMax TTS**, **ElevenLabs TTS**, self-hosted **Chatterbox TTS**, self-hosted **Kokoro TTS**, **Fish Audio TTS**, [ModelBest VoxCPM TTS](https://platform.modelbest.cn/console/docs/api/audio), and a no-voice mode.
 
 Select a provider and voice in the WebUI, then follow the on-screen instructions for any required credentials. Edge TTS does not require an API key; [Azure TTS V2](https://portal.azure.com/) and other cloud providers require credentials from their respective platforms. See the available Edge TTS voices in the [voice list](./docs/voice-list.txt).
+
+When `ELEVENLABS_API_KEY` is set in the process environment or the local `.env`,
+ElevenLabs becomes the initial automatic-voiceover provider for a new browser
+session. You can still switch providers manually. Its voice menu includes the
+server default (`ELEVENLABS_VOICE_ID`), curated voices, and available account
+voices. A configured key must have Text to Speech permission; account voice
+discovery also needs Voices: Read permission.
+
+The **Autonomous AI Agent** panel above Video Subject prepares a subject,
+30-60 second narration, English stock-footage keywords, language, and editable
+social caption in one LLM request. It uses the currently configured LLM and may
+consume API credits. Blank topics produce evergreen ideas, not verified live
+trends. All fields remain editable; the caption is for copying when publishing,
+and generation does not render or publish a video.
+
+Portable Windows users can also launch from the application directory with:
+
+```powershell
+..\lib\python\python.exe -m streamlit run webui.py --server.address=127.0.0.1 --server.port=8501
+```
+
+`webui.py` delegates to the existing `webui/Main.py` entry point.
+
+### Daily Auto-Pilot scheduling
+
+The **Auto-Pilot Scheduler** section defaults to **disabled**, with two
+America/New_York slots, **05:00** and **20:00**, and YouTube + Instagram targets.
+US daylight-saving changes follow the selected IANA timezone. These are
+generation start times, not guaranteed publication times; rendering/upload
+finishes later. Portrait MP4s are used for Shorts/Reels.
+
+1. Install the updated dependencies (`pip install -r requirements.txt`, or
+   `uv sync`). APScheduler 3.11.0, pytz and filelock are required.
+2. Configure an LLM, a stock-media key, ElevenLabs Text to Speech permission,
+   and the Upload-Post key/profile username. Connect both social accounts to
+   that Upload-Post profile. Choose the correct YouTube made-for-kids declaration.
+3. Start FastAPI normally: its lifespan owns the scheduler. For a UI-only
+   installation, keep a separate worker alive:
+   ```powershell
+   # From the portable application's MoneyPrinterTurbo directory:
+   ..\lib\python\python.exe -m app.services.scheduler
+   ```
+   On Linux use your virtual environment's Python with the same module command.
+   Run the backend or worker under systemd/Windows Task Scheduler to survive
+   machine restarts; Streamlit alone never starts scheduled jobs.
+4. Niche Style is locked to **The Afterframe (Sci-Fi / Thriller / Mystery)**.
+   Optional **Sub-theme Focus** guides a new standalone cinematic story (for
+   example, Time loops or Doppelgängers), never generic advice or internet trends.
+   Legacy `topic_mode`/`niche` values are accepted when loading old settings but
+   are no longer used for daily generation. The manual content agent and social
+   comment agent retain their existing behavior.
+   Stories use the five-field JSON schema `subject`, `hook`, `script`,
+   `visual_keywords`, `tags`. Backend validation requires a title under 40
+   characters, 75-95 narration words, an opening hook matching the script,
+   5-7 visual phrases, and the five Afterframe tags. Invalid responses are retried
+   once, then fail explicitly without rendering or publishing.
+   Recent story titles/hooks/scripts (last 20 runs) are supplied to avoid repeats;
+   exact repeated titles or scripts are rejected. This cannot guarantee semantic
+   originality across all possible stories.
+   Visual phrases feed stock search directly, brand tags feed publishing, and
+   the subject names the MP4 under `storage/outputs/scheduled/` (or configured root).
+   Narration duration is a pacing target; actual duration depends on the voice.
+5. Save settings and explicitly authorize API spending/public uploads when
+   enabling. Changes apply within 15 seconds. Restart the worker after changing
+   `.env` or publishing credentials. Disabling cancels future triggers only.
+
+If your EC2 `moneyprinter` systemd service already launches FastAPI, no extra
+worker service is needed: keep that service enabled with `Restart=on-failure`.
+For a standalone Linux worker, adapt the following unit to your installation
+and service user, then enable it with `sudo systemctl enable --now moneyprinter-autopilot`:
+
+```ini
+[Unit]
+Description=MoneyPrinterTurbo Auto-Pilot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt/MoneyPrinterTurbo
+ExecStart=/opt/MoneyPrinterTurbo/.venv/bin/python -m app.services.scheduler
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Save the unit as `/etc/systemd/system/moneyprinter-autopilot.service` and run
+`sudo systemctl daemon-reload` before enabling. Do not enable this extra unit
+when FastAPI already owns the scheduler. On Windows, configure Task Scheduler
+to launch the portable Python executable with arguments
+`-m app.services.scheduler`, start in the application directory, and trigger
+at system startup. The process must remain alive between scheduled runs.
+
+For a complete Ubuntu 22.04/24.04 EC2 setup with separate persistent Streamlit
+and scheduler services, see [Ubuntu systemd deployment](docs/ubuntu-systemd-deployment.md).
+Amazon Linux 2023 deployments using the `ec2-user` account and an existing
+`/usr/local/bin/ffmpeg` can use [the EC2 setup script and systemd guide](docs/amazon-linux-ec2-deployment.md).
+
+Settings live in `storage/schedule_config.json`; recent execution records and
+allowlisted platform IDs live in `storage/schedule_history.json`. They contain
+no credentials. The UI shows worker heartbeat, next audience/server times,
+and recent results. Keep the UI behind your existing authentication.
+
+A process lock permits only one backend/worker per storage directory. Another
+process does not start a second scheduler. This is single-host coordination,
+not a distributed multi-server scheduler; use one owner with persistent,
+shared-on-that-host storage. Overlapping runs are skipped and recorded.
+Runs missed by more than five minutes are not backfilled. Claimed slots are
+not rerun after restart; interrupted records remain visible for investigation.
+
+Topic/LLM preparation retries once (two attempts total); rendering services
+retain their own retry policies. Upload-Post already polls background results.
+The scheduler does **not** blindly resubmit failed/uncertain uploads, because
+the remote post may exist even after a timeout. Inspect the recorded request ID
+and each connected account before a manual retry. Scheduled renders suppress
+the general auto-uploader to prevent duplicate publishing.
+
+### Social Comment Agent
+
+The **💬 Social Comment Agent** panel monitors recent comments on YouTube,
+Instagram (Business/Creator) and a Facebook Page. Each comment is analysed by
+the configured LLM for sentiment, category, sensitivity and video ideas. The
+agent posts AI replies automatically, and turns strong viewer requests into
+rendered videos published through Upload-Post. Everything is disabled by
+default. Enabling it requires the consent checkbox. The panel reads and writes
+settings only; the FastAPI backend (or the standalone worker) does the polling.
+
+Credentials are read **only** from the server `.env`. They are never stored in
+`config.toml`, presets, logs or `storage/`, and they are never sent to the
+browser:
+
+```env
+# YouTube Data API v3: OAuth client plus a refresh token with the youtube.force-ssl scope
+YOUTUBE_CLIENT_ID=
+YOUTUBE_CLIENT_SECRET=
+YOUTUBE_REFRESH_TOKEN=
+# Meta Graph API: long-lived Page token with pages_read_engagement,
+# pages_manage_engagement, instagram_basic and instagram_manage_comments
+META_PAGE_ACCESS_TOKEN=
+META_PAGE_ID=
+INSTAGRAM_BUSINESS_ACCOUNT_ID=
+META_GRAPH_VERSION=v21.0
+```
+
+Run it with the backend, or standalone:
+
+```bash
+python -m app.services.comment_agent
+```
+
+Safety behaviour:
+
+- **Treated as untrusted:** comment text is passed to the LLM as JSON data.
+- **Validated before posting:** the agent checks the LLM output first. It skips
+  spam, abusive and sensitive comments, and drops replies that contain links or
+  e-mail addresses.
+- **Your own comments:** the channel/page's own comments are ignored.
+- **Old comments:** comments older than the configured age are ignored, so
+  enabling the agent does not flood old threads.
+- **Reply caps:** each platform has hourly and daily reply caps plus a minimum
+  delay between replies. Replies over a cap are deferred, not dropped.
+- **Recorded before posting:** each reply attempt is saved first. A failed or
+  lost response (`failed` / `uncertain`) is never retried automatically. A
+  restart turns in-flight replies into `uncertain`.
+- **Video ideas:**
+  - Ideas are de-duplicated for 30 days and expire after 7 days in the queue.
+  - Ideas are limited by **Max comment-driven videos per day**.
+  - Rendering shares the Auto-Pilot render lock, so the two never render at the
+    same time.
+  - Uploads follow the same no-blind-retry rule as Auto-Pilot.
+
+State is kept in these files:
+
+- `storage/comment_agent_config.json`
+- `storage/comment_agent_state.json`
+- `storage/comment_agent_status.json`
 
 ModelBest VoxCPM requires an API key and a model ID with the `speech_synthesis` capability. Its SSE response streams WAV audio, which MoneyPrinterTurbo automatically converts to the MP3 used by the video pipeline. In addition to standard text-to-speech, the WebUI can clone speaker identity from optional reference audio. High-fidelity delivery reuses that clip with its exact transcript by default, or accepts a separate performance example, and sends `prompt_audio` plus `prompt_text` to continue its pacing, emotion, and pronunciation. The WebUI can use the local Whisper configuration to create an editable transcript draft. Uploads are limited to 20 MiB and each converted WAV to 5 MiB. Reference material is scoped to the current browser session and task and is not written to configuration, presets, task history, or logs.
 

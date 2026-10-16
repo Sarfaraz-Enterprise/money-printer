@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 from app.config import config
@@ -13,6 +14,11 @@ ROOT_DIR = Path(__file__).parent.parent.parent
 WEBUI_MAIN = ROOT_DIR / "webui" / "Main.py"
 I18N_DIR = ROOT_DIR / "webui" / "i18n"
 LOCALES = ("de", "en", "es", "id", "pt", "ru", "tr", "vi", "zh")
+
+
+@pytest.fixture(autouse=True)
+def isolate_elevenlabs_environment(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "")
 
 # 每个服务商只维护一个官方入口。Chatterbox 是自托管服务，没有统一的 Key
 # 领取平台，因此链接到实际使用的兼容服务配置说明，避免误导用户注册第三方账号。
@@ -209,6 +215,7 @@ def test_elevenlabs_reconnect_restores_saved_key_before_loading_voices():
     )
 
     with (
+        patch.dict(os.environ, {"ELEVENLABS_API_KEY": ""}),
         patch.object(config, "elevenlabs", test_config),
         patch.object(config, "ui", test_ui),
         patch.object(config, "try_save_config", return_value=True),
@@ -220,7 +227,8 @@ def test_elevenlabs_reconnect_restores_saved_key_before_loading_voices():
         app.run()
 
     assert test_config["api_key"] == "saved-key"
-    assert app.session_state["elevenlabs_api_key_input"] == "saved-key"
+    # The server key drives voice loading but is never sent back to the browser.
+    assert app.session_state["elevenlabs_api_key_input"] == ""
     assert get_voices.call_count >= 1
     assert all(call.args == ("saved-key",) for call in get_voices.call_args_list)
     assert [str(item.value) for item in app.exception] == []
@@ -248,9 +256,66 @@ def test_elevenlabs_environment_key_is_used_without_persisting_it():
         app.run()
 
     assert test_config["api_key"] == ""
-    assert app.session_state["elevenlabs_api_key_input"] == "env-key"
+    assert app.session_state["elevenlabs_api_key_input"] == ""
     assert get_voices.call_count >= 1
     assert all(call.args == ("env-key",) for call in get_voices.call_args_list)
+    assert [str(item.value) for item in app.exception] == []
+
+
+def test_elevenlabs_server_key_is_never_rendered_into_the_browser_widget():
+    """Neither the config.toml key nor ELEVENLABS_API_KEY may reach the frontend."""
+    for config_key, env in (("config-secret", {}), ("", {"ELEVENLABS_API_KEY": "env-secret"})):
+        test_config = dict(config.elevenlabs, api_key=config_key)
+        test_ui = dict(config.ui, voice_mode="tts", tts_server="elevenlabs", voice_name="")
+        with (
+            patch.object(config, "elevenlabs", test_config),
+            patch.object(config, "ui", test_ui),
+            patch.object(config, "try_save_config", return_value=True),
+            patch.dict(os.environ, env),
+            patch.object(voice, "get_elevenlabs_voices", return_value=[]),
+        ):
+            app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+            app.session_state["ui_language"] = "en"
+            app.run()
+
+        key_input = _widget_by_key(app.text_input, "elevenlabs_api_key_input")
+        assert key_input.value == ""
+        assert key_input.proto.type == key_input.proto.PASSWORD
+        rendered = str(app.get("text_input")) + str(app.caption) + str(app.markdown)
+        assert "config-secret" not in rendered and "env-secret" not in rendered
+        assert [str(item.value) for item in app.exception] == []
+
+
+def test_elevenlabs_voice_list_offers_server_default_and_catalog():
+    test_config = dict(config.elevenlabs, api_key="k")
+    test_ui = dict(config.ui, voice_mode="tts", tts_server="elevenlabs", voice_name="")
+    with (
+        patch.object(config, "elevenlabs", test_config),
+        patch.object(config, "ui", test_ui),
+        patch.object(config, "try_save_config", return_value=True),
+        patch.object(
+            voice,
+            "get_elevenlabs_voices",
+            # Duplicates a catalog ID; it must appear only once.
+            return_value=["elevenlabs:pNInz6obpgDQGcFmaJgB:Adam", "elevenlabs:acct1:Mine"],
+        ),
+    ):
+        app = AppTest.from_file(str(WEBUI_MAIN), default_timeout=30)
+        app.session_state["ui_language"] = "en"
+        app.run()
+
+    options = _widget_by_key(app.selectbox, "speech_synthesis_select_elevenlabs").options
+    assert options[0] == "Server default"
+    for label in (
+        "Adam - Deep / Narration (Male)",
+        "Antoni - Storytelling / Smooth (Male)",
+        "Marcus - Confident / Energetic (Male)",
+        "Rachel - Calm / Professional (Female)",
+        "Elli - Emotional / Storytelling (Female)",
+        "Domni - Expressive / Friendly (Female)",
+    ):
+        assert sum(label in option for option in options) == 1
+    assert "Mine" in options
     assert [str(item.value) for item in app.exception] == []
 
 

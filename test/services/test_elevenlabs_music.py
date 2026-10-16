@@ -7,6 +7,7 @@ from threading import Thread
 from unittest.mock import patch
 
 import requests
+from app.config import env_secrets
 
 from app.services import elevenlabs_music
 
@@ -49,6 +50,13 @@ class _StreamingResponse:
 
 
 class TestElevenLabsMusicService(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="autoflow-test-env-")
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / ".env"
+        target.write_text("ELEVENLABS_API_KEY=test-key\n")
+        self.enterContext(patch.object(env_secrets, "DOTENV_PATH", target))
+
     def test_safe_response_error_reads_only_one_bounded_chunk(self):
         class OversizedErrorResponse:
             reason = "Request failed"
@@ -142,7 +150,8 @@ class TestElevenLabsMusicService(unittest.TestCase):
             server.server_close()
             worker.join(timeout=5)
 
-    def test_api_key_prefers_config_and_falls_back_to_environment(self):
+    def test_api_key_reads_dotenv_without_config_fallback(self):
+        env_secrets.DOTENV_PATH.write_text("ELEVENLABS_API_KEY=file-key\n")
         with (
             patch.object(
                 elevenlabs_music.config,
@@ -151,17 +160,18 @@ class TestElevenLabsMusicService(unittest.TestCase):
             ),
             patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key"}),
         ):
-            self.assertEqual(elevenlabs_music.get_api_key(), "config-key")
+            self.assertEqual(elevenlabs_music.get_api_key(), "file-key")
 
+        env_secrets.DOTENV_PATH.write_text("")
         with (
             patch.object(
                 elevenlabs_music.config,
                 "elevenlabs",
-                {"api_key": ""},
+                {"api_key": "config-key"},
             ),
-            patch.dict(os.environ, {"ELEVENLABS_API_KEY": "env-key"}),
+            patch.dict(os.environ, {"ELEVENLABS_API_KEY": ""}),
         ):
-            self.assertEqual(elevenlabs_music.get_api_key(), "env-key")
+            self.assertEqual(elevenlabs_music.get_api_key(), "")
 
     def test_model_and_timeout_reject_invalid_configuration(self):
         """第三方请求配置异常时必须回退安全默认值，不能让任务直接崩溃。"""

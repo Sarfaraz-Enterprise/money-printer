@@ -25,22 +25,32 @@ RUN_INTEGRATION_TESTS = os.environ.get("MPT_RUN_INTEGRATION_TESTS", "").lower() 
 
 
 class TestTaskService(unittest.TestCase):
-    def test_final_video_export_preserves_original_and_separates_tasks(self):
+    def test_final_video_export_preserves_original_and_numbers_subjects(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             export_root = Path(temporary_dir) / "MoneyPrint Ai Video"
             with patch.dict(tm.config.app, {"final_video_export_dir": str(export_root)}):
-                for task_id in ("task-one", "task-two"):
+                for number, task_id in enumerate(("task-one", "task-two"), start=1):
                     source = Path(temporary_dir) / task_id / "final-1.mp4"
                     source.parent.mkdir()
                     source.write_bytes(task_id.encode())
-                    destination = Path(tm._export_final_video(str(source)))
-                    self.assertEqual(destination, export_root / task_id / source.name)
+                    destination = Path(tm._export_final_video(str(source), "Mindset Shifts"))
+                    filename = "Mindset Shifts.mp4" if number == 1 else f"Mindset Shifts {number}.mp4"
+                    self.assertEqual(destination, export_root / "manual" / filename)
                     self.assertEqual(destination.read_bytes(), source.read_bytes())
                     self.assertTrue(source.exists())
 
-    def test_final_video_export_is_disabled_when_unconfigured(self):
-        with patch.dict(tm.config.app, {"final_video_export_dir": ""}):
-            self.assertEqual(tm._export_final_video("missing/final-1.mp4"), "")
+    def test_final_video_export_defaults_to_storage_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            source = Path(temporary_dir) / "source.mp4"
+            source.write_bytes(b"video")
+            with (
+                patch.dict(tm.config.app, {"final_video_export_dir": ""}),
+                patch.object(utils, "root_dir", return_value=temporary_dir),
+            ):
+                destination = Path(tm._export_final_video(str(source)))
+            self.assertEqual(
+                destination, Path(temporary_dir) / "storage" / "outputs" / "manual" / "Auto_Video.mp4"
+            )
 
     def test_final_video_export_failure_cleans_up_partial_copy(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -55,7 +65,8 @@ class TestTaskService(unittest.TestCase):
                 with self.assertRaises(OSError):
                     tm._export_final_video(str(source))
             self.assertEqual(source.read_bytes(), b"original")
-            self.assertEqual(list((export_root / "task-one").iterdir()), [])
+            self.assertEqual(list((export_root / "manual").glob("*.mp4")), [])
+            self.assertEqual(list((export_root / "manual").glob(".export-*")), [])
 
     def setUp(self):
         # 发布 Future 注册表是进程级状态。测试间清理可以避免某个模拟 Future
@@ -122,6 +133,7 @@ class TestTaskService(unittest.TestCase):
             custom_system_prompt="Only write short narration.",
         )
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_forwards_clip_speed_and_fit_mode(self):
         """任务编排层必须把画面速度和适配模式传给视频合成服务。"""
         params = VideoParams(
@@ -224,6 +236,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(result, ["a.mp4"])
         self.assertEqual(observed, [42, 45, 50])
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_clip_processing_moves_progress_through_the_combine_half(self):
         """
         片段处理期间进度此前固定在 50%。合成占每条视频进度份额的前一半：
@@ -270,6 +283,7 @@ class TestTaskService(unittest.TestCase):
                     state.get_task("combine-progress")["progress"], 100
                 )
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_uses_generated_sonilo_music(self):
         """Sonilo 必须针对每条拼接后的视频生成配乐，并传给最终混音。"""
         params = VideoParams(
@@ -307,6 +321,7 @@ class TestTaskService(unittest.TestCase):
             )
         )
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_uses_generated_elevenlabs_music(self):
         """ElevenLabs 应复用视频配乐编排，并使用通用风格提示词。"""
         params = VideoParams(
@@ -344,6 +359,7 @@ class TestTaskService(unittest.TestCase):
             )
         )
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_falls_back_on_elevenlabs_failure(self):
         """ElevenLabs 暂时失败时必须保留无配乐视频和结构化警告。"""
         params = VideoParams(video_subject="test", bgm_type="elevenlabs")
@@ -376,6 +392,7 @@ class TestTaskService(unittest.TestCase):
         )
         self.assertEqual(generate_video.call_args.kwargs["bgm_file_override"], "")
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_falls_back_without_bgm_on_sonilo_failure(self):
         """第三方配乐失败时应完成视频并返回可见警告，而不是丢弃所有产物。"""
         params = VideoParams(video_subject="test", bgm_type="sonilo")
@@ -403,6 +420,7 @@ class TestTaskService(unittest.TestCase):
         self.assertEqual(warnings, [{"code": "sonilo_bgm_failed", "video_index": 1}])
         self.assertEqual(generate_video.call_args.kwargs["bgm_file_override"], "")
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_skips_sonilo_when_volume_is_zero(self):
         """0 音量必须完全跳过 Sonilo 生成，并显式禁用残留背景音乐。"""
         params = VideoParams(
@@ -432,6 +450,7 @@ class TestTaskService(unittest.TestCase):
         generate_bgm.assert_not_called()
         self.assertEqual(generate.call_args.kwargs["bgm_file_override"], "")
 
+    @patch.object(tm, "_export_final_video", new=lambda source, *args: source)
     def test_generate_final_videos_warns_when_sonilo_mix_fails(self):
         """Sonilo 生成成功但最终混音失败时，任务必须保留视频并返回警告。"""
         params = VideoParams(video_subject="test", bgm_type="sonilo")

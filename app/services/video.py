@@ -493,7 +493,7 @@ def _format_ffmpeg_concat_path(file_path: str) -> str:
 
     FFmpeg 官方文档要求 concat list 中的特殊字符和空格需要转义；Windows
     绝对路径里的反斜杠也容易被解析成转义字符。这里统一转成正斜杠形式，
-    让 `C:\\Users\\...` 变成 `C:/Users/...`，再处理单引号，兼容 macOS/Linux。
+    再处理单引号，兼容 macOS/Linux。
     """
     absolute_path = os.path.abspath(file_path)
     return _escape_ffmpeg_concat_path(absolute_path.replace("\\", "/"))

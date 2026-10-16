@@ -8,7 +8,7 @@ from typing import Any
 import requests
 from loguru import logger
 
-from app.config import config
+from app.config import config, env_secrets
 from app.services import bgm as bgm_service
 from app.utils import utils
 
@@ -42,10 +42,14 @@ def get_api_key() -> str:
     读取 ElevenLabs 共用 API Key。
 
     配乐与现有 ElevenLabs TTS 使用同一个账号配置，避免用户在 WebUI 重复维护
-    两份 Key；环境变量仅作为本机配置未填写时的后备来源。
+    两份 Key；``ELEVENLABS_API_KEY`` 环境变量优先，未设置时使用 config.toml。
     """
-    configured_key = str(config.elevenlabs.get("api_key", "") or "").strip()
-    return configured_key or os.getenv("ELEVENLABS_API_KEY", "").strip()
+    return str(
+        env_secrets.resolve(
+            "elevenlabs", "api_key", config.elevenlabs.get("api_key", "")
+        )
+        or ""
+    ).strip()
 
 
 def is_enabled() -> bool:

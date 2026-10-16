@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from app.config import config
+from app.config import config, env_secrets
 from app.models.llm_provider import (
     DEFAULT_LLM_PROVIDER_ID,
     LLM_PROVIDER_REGISTRY,
@@ -339,6 +339,11 @@ class TestLLMConnection(unittest.TestCase):
 
 class TestLiteLLMProvider(unittest.TestCase):
     def setUp(self):
+        directory = tempfile.TemporaryDirectory(prefix="autoflow-test-env-")
+        self.addCleanup(directory.cleanup)
+        target = Path(directory.name) / ".env"
+        target.write_text("")
+        self.enterContext(patch.object(env_secrets, "DOTENV_PATH", target))
         self.original_app_config = dict(config.app)
 
     def tearDown(self):
@@ -874,10 +879,12 @@ class TestLiteLLMProvider(unittest.TestCase):
 
     def test_anthropic_uses_openai_compatible_chat_completions(self):
         """Claude 走 Anthropic 的 OpenAI 兼容端点，不需要额外适配器分支。"""
+        env_secrets.DOTENV_PATH.write_text("ANTHROPIC_API_KEY=anthropic-test-key\n")
         config.app.update(
             {
                 "llm_provider": "anthropic",
                 "anthropic_api_key": "anthropic-test-key",
+                "anthropic_workspace_id": "",
                 "anthropic_base_url": "",
                 "anthropic_model_name": "",
             }
@@ -904,6 +911,7 @@ class TestLiteLLMProvider(unittest.TestCase):
         openai_client.assert_called_once_with(
             api_key="anthropic-test-key",
             base_url="https://api.anthropic.com/v1/",
+            default_headers={},
         )
         self.assertEqual(
             fake_completions.kwargs,
@@ -916,6 +924,7 @@ class TestLiteLLMProvider(unittest.TestCase):
 
     def test_gemini_uses_google_genai_client(self):
         """Gemini 适配器应通过新版 SDK 的统一 Client 发起内容生成请求。"""
+        env_secrets.DOTENV_PATH.write_text("GEMINI_API_KEY=gemini-test-key\n")
         config.app.update(
             {
                 "llm_provider": "gemini",

@@ -438,7 +438,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                 prompt_input = self._widget_by_key(
                     app.text_input, "elevenlabs_music_prompt_input"
                 )
-                self.assertEqual(api_key_input.value, "saved-elevenlabs-key")
+                self.assertEqual(api_key_input.value, "")
                 self.assertEqual(
                     api_key_input.label,
                     self._translation(locale, "ElevenLabs Music API Key"),
@@ -485,7 +485,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                 )
             ]
             self.assertEqual(len(shared_inputs), 1)
-            self.assertEqual(shared_inputs[0].value, "key-A")
+            self.assertEqual(shared_inputs[0].value, "")
             self.assertFalse(
                 any(
                     str(getattr(item, "key", "")).startswith(
@@ -499,7 +499,8 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
             updated_input = self._widget_by_key(
                 app.text_input, "elevenlabs_api_key_input"
             )
-            self.assertEqual(updated_input.value, "key-B")
+            # The new key is saved server-side and cleared from the widget.
+            self.assertEqual(updated_input.value, "")
             self.assertEqual(test_config["api_key"], "key-B")
 
         self.assertEqual([str(item.value) for item in app.exception], [])

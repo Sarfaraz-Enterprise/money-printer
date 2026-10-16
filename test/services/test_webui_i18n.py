@@ -140,6 +140,30 @@ ENGLISH_FALLBACK_KEYS = frozenset(
         "None (Animation)",
     }
 )
+# Operator automation panels (content agent, Auto-Pilot, comment agent) are
+# maintained in English/Chinese only; other locales fall back to English.
+AUTOMATION_FALLBACK_PREFIXES = ("Auto-Pilot", "Comment Agent", "Content Agent")
+ENGLISH_FALLBACK_KEYS = ENGLISH_FALLBACK_KEYS | frozenset(
+    key
+    for key in json.loads(
+        (Path(__file__).resolve().parents[2] / "webui" / "i18n" / "en.json").read_text(encoding="utf-8")
+    )["Translation"]
+    if key.startswith(AUTOMATION_FALLBACK_PREFIXES)
+) | frozenset(
+    {
+        "Autonomous AI Agent",
+        "Auto-Generate Everything",
+        "Content Package Applied",
+        "Generating Content Package",
+        "Enable Daily Auto-Pilot",
+        "Target Audience Timezone",
+        "Recent Auto-Published Runs",
+        "No Auto-Pilot Runs",
+        "Save Auto-Pilot Settings",
+        "Social Comment Agent",
+        "Save Comment Agent Settings",
+    }
+)
 FORMAT_PLACEHOLDER_PATTERN = re.compile(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})")
 MARKDOWN_URL_PATTERN = re.compile(r"\[[^\]]+\]\((https?://[^)]+)\)")
 

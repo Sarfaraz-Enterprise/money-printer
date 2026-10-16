@@ -28,7 +28,7 @@ from moviepy.video.tools import subtitles
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from openai import OpenAI
 
-from app.config import config
+from app.config import config, env_secrets
 from app.utils import utils
 from app.utils.subtitle_writer import staged_subtitle_file
 
@@ -79,6 +79,22 @@ GEMINI_TTS_VOICES = (
 _MINIMAX_TTS_MAX_AUDIO_HEX_CHARS = 100 * 1024 * 1024
 _ELEVENLABS_TTS_MAX_AUDIO_BYTES = 50 * 1024 * 1024
 _ELEVENLABS_TTS_MAX_ERROR_BYTES = 4096
+# The voice ID is interpolated into the request URL path, so only accept the
+# characters ElevenLabs IDs use. This blocks path/query injection via "/", "?", "..".
+_ELEVENLABS_VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# Selecting this value asks the backend to use the server-side default voice
+# (config.toml [elevenlabs] voice_id, then the ELEVENLABS_VOICE_ID env var).
+ELEVENLABS_SERVER_DEFAULT_VOICE = "elevenlabs::Server default"
+# Curated premade voices: (category, label, voice_id). Categories drive the WebUI
+# grouping only; any valid account voice ID is still accepted by the backend.
+ELEVENLABS_VOICE_CATALOG = (
+    ("Male", "Adam - Deep / Narration (Male)", "pNInz6obpgDQGcFmaJgB"),
+    ("Male", "Antoni - Storytelling / Smooth (Male)", "ErXwobaYiN019PkySvjV"),
+    ("Male", "Marcus - Confident / Energetic (Male)", "IdgQo4Tj86YgX3Hk8x09"),
+    ("Female", "Rachel - Calm / Professional (Female)", "21m00Tcm4TlvDq8ikWAM"),
+    ("Female", "Elli - Emotional / Storytelling (Female)", "MF3mGyEYCl7XYWbV9V6O"),
+    ("Female", "Domni - Expressive / Friendly (Female)", "AZnzlk1XvdvUeBnXmlld"),
+)
 VOXCPM_DEFAULT_BASE_URL = "https://api.modelbest.cn/v1"
 VOXCPM_DEFAULT_VOICE = "default"
 VOXCPM_REFERENCE_AUDIO_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -419,19 +435,66 @@ def is_minimax_voice(voice_name: str | None) -> bool:
 
 
 def is_elevenlabs_voice(voice_name: str) -> bool:
-    return (voice_name or "").startswith("elevenlabs:")
+    name = voice_name or ""
+    # A bare "elevenlabs" means "provider selected, no specific voice".
+    return name == "elevenlabs" or name.startswith("elevenlabs:")
+
+
+def get_default_elevenlabs_voice_id() -> str:
+    """Server-side default voice: ELEVENLABS_VOICE_ID first, then config.toml."""
+    return str(
+        env_secrets.resolve(
+            "elevenlabs", "voice_id", config.elevenlabs.get("voice_id", "")
+        )
+        or ""
+    ).strip()
+
+
+def get_elevenlabs_catalog_voices() -> list[str]:
+    """Catalog voices in the same ``elevenlabs:{id}:{name}`` format as account voices."""
+    return [
+        f"elevenlabs:{voice_id}:{label} · {category}"
+        for category, label, voice_id in ELEVENLABS_VOICE_CATALOG
+    ]
+
+
+def resolve_elevenlabs_voice_id(voice_name: str | None) -> str:
+    """
+    Return the validated voice ID for a request, or "" if none is usable.
+
+    ``elevenlabs:{id}:{name}`` uses the requested ID. ``elevenlabs``,
+    ``elevenlabs:`` and ``elevenlabs::...`` fall back to the server default.
+    """
+    parts = (voice_name or "").split(":", 2)
+    requested_id = parts[1].strip() if len(parts) >= 2 else ""
+    voice_id = requested_id or get_default_elevenlabs_voice_id()
+    if not voice_id:
+        logger.error(
+            "No ElevenLabs voice selected and no server default is configured "
+            "(set ELEVENLABS_VOICE_ID or [elevenlabs] voice_id)"
+        )
+        return ""
+    if not _ELEVENLABS_VOICE_ID_PATTERN.fullmatch(voice_id):
+        logger.error("Rejected ElevenLabs voice ID with invalid format")
+        return ""
+    if not requested_id:
+        logger.info("No ElevenLabs voice in request; using server default voice")
+    return voice_id
 
 
 def get_elevenlabs_api_key() -> str:
     """
     读取 ElevenLabs TTS 使用的 API Key。
 
-    配置文件优先，环境变量仅作为未配置时的后备来源。WebUI 和配乐功能已经
-    支持 ``ELEVENLABS_API_KEY``，TTS 必须使用相同规则，否则仅通过容器环境
-    变量部署时，音色列表可正常加载，真正合成语音却会误报未配置 Key。
+    ``ELEVENLABS_API_KEY`` is read exclusively from the root .env file.
+    Music generation uses the same rule via ``env_secrets``.
     """
-    configured_key = str(config.elevenlabs.get("api_key", "") or "").strip()
-    return configured_key or os.getenv("ELEVENLABS_API_KEY", "").strip()
+    return str(
+        env_secrets.resolve(
+            "elevenlabs", "api_key", config.elevenlabs.get("api_key", "")
+        )
+        or ""
+    ).strip()
 
 
 def is_chatterbox_voice(voice_name: str) -> bool:
@@ -659,14 +722,11 @@ def _single_tts(
         logger.error(f"Invalid MiniMax voice name format: {voice_name}")
         return None
     elif is_elevenlabs_voice(voice_name):
-        # 格式: elevenlabs:{voice_id}:{name}
-        parts = voice_name.split(":")
-        if len(parts) >= 2:
-            voice_id = parts[1]
-            return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume)
-        else:
-            logger.error(f"Invalid elevenlabs voice name format: {voice_name}")
+        # 格式: elevenlabs:{voice_id}:{name}；缺少 voice_id 时回退到服务端默认音色。
+        voice_id = resolve_elevenlabs_voice_id(voice_name)
+        if not voice_id:
             return None
+        return elevenlabs_tts(text, voice_id, voice_file, voice_rate, voice_volume)
     elif is_chatterbox_voice(voice_name):
         # 格式: chatterbox:<voice>，voice 可带显示用的 -Female/-Male 后缀
         parts = voice_name.split(":", 1)
@@ -1842,7 +1902,7 @@ def gemini_tts(
     
     temporary_audio = None
     try:
-        api_key = config.app.get("gemini_api_key", "")
+        api_key = env_secrets.global_value("GEMINI_API_KEY")
         if not api_key:
             logger.error("Gemini API key is not set")
             return None
@@ -2342,6 +2402,11 @@ def elevenlabs_tts(
         logger.error("ElevenLabs TTS text is empty")
         return None
 
+    voice_id = (voice_id or "").strip()
+    if not _ELEVENLABS_VOICE_ID_PATTERN.fullmatch(voice_id):
+        logger.error("ElevenLabs TTS rejected an invalid voice ID")
+        return None
+
     api_key = get_elevenlabs_api_key()
     if not api_key:
         logger.error("ElevenLabs API key is not set")
@@ -2407,6 +2472,13 @@ def elevenlabs_tts(
                     pass
                 error_text = error_bytes.decode("utf-8", errors="replace")[:200]
 
+                if error_status == "missing_permissions":
+                    logger.error(
+                        "ElevenLabs TTS failed: the API key lacks the 'Text to Speech' permission. "
+                        "Edit the key at https://elevenlabs.io/app/settings/api-keys and enable it, "
+                        "then update ELEVENLABS_API_KEY in .env."
+                    )
+                    return None
                 if response.status_code in _NON_RETRYABLE_CODES or error_status in _NON_RETRYABLE_STATUSES:
                     logger.error(
                         f"ElevenLabs TTS failed (non-retryable) — voice_id: {voice_id}, "

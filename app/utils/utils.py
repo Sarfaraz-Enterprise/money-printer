@@ -87,7 +87,7 @@ def normalize_clip_speed(value, default: float = 1.0) -> float:
 
 
 def root_dir():
-    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    return str(Path(__file__).resolve().parents[2])
 
 
 def storage_dir(sub_dir: str = "", create: bool = False):

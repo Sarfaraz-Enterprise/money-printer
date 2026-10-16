@@ -19,12 +19,23 @@ Launch plan: one reviewed short per day for 30 days.
 - Upload targets are YouTube and Instagram; automatic upload is OFF.
 
 Settings live in config.toml. Keep this file private because it contains credentials.
-The app setting final_video_export_dir optionally saves an additional final MP4
-copy under <export folder>/<task ID>/final-<index>.mp4. Internal task files stay
-in storage for playback and history. Export failure leaves the original intact
-and produces a task warning. Existing videos are not moved. On this Windows
-installation, the export folder is MoneyPrint Ai Video on the OneDrive Desktop;
-allow enough local disk space and OneDrive quota for the additional copies.
+Final MP4s are saved under `storage/outputs/` by default. Set the app setting
+`final_video_export_dir` to use another output root (relative paths are resolved
+from the application directory). The root contains `manual/` for UI/API renders,
+`scheduled/` for daily Auto-Pilot jobs, and `fully_automatic/` for comment-driven
+end-to-end agent runs. AI-assisted scripts rendered manually still use `manual/`.
+Filenames match the sanitized Video Subject, for example `Mindset Shifts.mp4`.
+Duplicates use `Mindset Shifts 2.mp4`, then `3`, etc. Spaces, safe punctuation
+and Unicode are preserved; invalid OS characters are replaced with spaces.
+Leading/trailing whitespace and Windows-unsafe trailing dots are removed;
+reserved device names are prefixed with `_`. Subjects are not truncated;
+blank subjects use `Auto_Video`. Numbering is per subject/category and protected by a cross-process
+lock; deleting a gap does not renumber remaining files.
+Task copies stay in storage for compatibility with existing history. New task
+results and publishers use the absolute categorized output path; API responses
+use authenticated stream/download URLs instead of exposing an output directory.
+Export failure fails the task explicitly and retains the original task copy.
+Existing videos are not moved. Allow disk space for both copies.
 Script duration is a target, not an enforced runtime. Full Preview gives actual
 voice duration; revise the script before rendering if it is outside 35-40 seconds.
 Edge TTS provides a consistent voice but does not guarantee dramatic acting.
